@@ -1,7 +1,12 @@
-// 系统托盘图标 + 共享右键菜单（移植自 tray.py + menu.py）。
-// 托盘菜单与歌词窗口右键菜单用同一份定义：任务栏/浮动（radio）、锁定（check）、
+// 系统托盘图标 + 共享右键菜单（WPF ContextMenu，自动套用 Fluent/Win11 主题）。
+// 托盘菜单与歌词窗口右键菜单用同一份定义：任务栏/浮动（check）、锁定（check）、
 // 打开设置…、退出。NotifyIcon 在 UI 线程创建，事件直接在 UI 线程触发，无需跨线程投递。
+using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Forms;
+using ContextMenu = System.Windows.Controls.ContextMenu; // WinForms 也有 ContextMenu，消歧
+using MenuItem = System.Windows.Controls.MenuItem;       // WinForms 也有 MenuItem，消歧
+using PlacementMode = System.Windows.Controls.Primitives.PlacementMode;
 
 namespace TaskbarLyrics;
 
@@ -9,13 +14,10 @@ public sealed class TrayIcon : IDisposable
 {
     private readonly MainController _app;
     private readonly NotifyIcon _icon;
-    private readonly ContextMenuStrip _menu;
 
     public TrayIcon(MainController app)
     {
         _app = app;
-        _menu = new ContextMenuStrip();
-        _menu.Opening += (_, _) => RebuildMenu();
 
         System.Drawing.Icon icon;
         try
@@ -34,47 +36,68 @@ public sealed class TrayIcon : IDisposable
             Text = "任务栏歌词",
             Icon = icon,
             Visible = true,
-            ContextMenuStrip = _menu,
+        };
+        // 不设 ContextMenuStrip（WinForms 样式老旧），右键改弹 WPF Fluent 菜单
+        _icon.MouseUp += (_, e) =>
+        {
+            if (e.Button == MouseButtons.Right) ShowMenuAtCursor();
         };
     }
 
     /// <summary>菜单规范（menu.py build_spec）：高频操作，详细设置进设置窗口。</summary>
-    private void RebuildMenu()
+    private ContextMenu BuildMenu()
     {
-        _menu.Items.Clear();
         var cfg = _app.Cfg;
+        var menu = new ContextMenu();
 
-        var taskbar = new ToolStripMenuItem("任务栏模式") { Checked = cfg.Mode == "taskbar" };
-        taskbar.Click += (_, _) => _app.SetMode("taskbar");
-        var floating = new ToolStripMenuItem("浮动模式") { Checked = cfg.Mode == "floating" };
-        floating.Click += (_, _) => _app.SetMode("floating");
-        var locked = new ToolStripMenuItem("锁定位置（鼠标穿透）") { Checked = cfg.Locked };
-        locked.Click += (_, _) => _app.SetLocked(!cfg.Locked);
-        var settings = new ToolStripMenuItem("打开设置…");
-        settings.Click += (_, _) => _app.OpenSettings();
-        var quit = new ToolStripMenuItem("退出");
-        quit.Click += (_, _) => _app.Quit();
+        MenuItem Item(string header, bool isChecked, Action onClick)
+        {
+            var mi = new MenuItem { Header = header, IsChecked = isChecked };
+            mi.Click += (_, _) => onClick();
+            return mi;
+        }
 
-        _menu.Items.Add(taskbar);
-        _menu.Items.Add(floating);
-        _menu.Items.Add(locked);
-        _menu.Items.Add(new ToolStripSeparator());
-        _menu.Items.Add(settings);
-        _menu.Items.Add(new ToolStripSeparator());
-        _menu.Items.Add(quit);
+        menu.Items.Add(Item("任务栏模式", cfg.Mode == "taskbar", () => _app.SetMode("taskbar")));
+        menu.Items.Add(Item("浮动模式", cfg.Mode == "floating", () => _app.SetMode("floating")));
+        menu.Items.Add(Item("锁定位置（鼠标穿透）", cfg.Locked, () => _app.SetLocked(!cfg.Locked)));
+        menu.Items.Add(new Separator());
+        menu.Items.Add(Item("打开设置…", false, _app.OpenSettings));
+        menu.Items.Add(new Separator());
+        menu.Items.Add(Item("退出", false, _app.Quit));
+        return menu;
     }
 
-    /// <summary>歌词窗口右键：在光标处弹出同一份菜单。</summary>
+    /// <summary>托盘右键 / 歌词窗口右键：在光标处弹出同一份菜单。</summary>
     public void ShowMenuAtCursor()
     {
-        RebuildMenu();
-        _menu.Show(Cursor.Position);
+        var menu = BuildMenu();
+        // 独立弹出的 WPF ContextMenu 需要一个能获得焦点的属主窗口：
+        // 本程序所有窗口都是不激活的，直接 IsOpen 会立即失焦关闭。
+        // 用一个 0x0 隐形可激活窗口做属主，菜单关闭时一并销毁。
+        var owner = new Window
+        {
+            Width = 0,
+            Height = 0,
+            WindowStyle = WindowStyle.None,
+            ShowInTaskbar = false,
+            ShowActivated = true,
+            Topmost = true,
+            AllowsTransparency = true,
+            Background = System.Windows.Media.Brushes.Transparent,
+            Left = -32000, // 0 尺寸不可见，停哪都行，放屏幕外保险
+            Top = -32000,
+        };
+        owner.ContextMenu = menu;
+        owner.Show();
+        menu.Placement = PlacementMode.MousePoint; // 跟随光标，WPF 自行处理多屏 DPI
+        menu.PlacementTarget = owner;
+        menu.IsOpen = true;
+        menu.Closed += (_, _) => owner.Close();
     }
 
     public void Dispose()
     {
         _icon.Visible = false;
         _icon.Dispose();
-        _menu.Dispose();
     }
 }
