@@ -1,4 +1,4 @@
-// 统一设置窗口（移植自 settings_window.py）：所有选项集中管理。
+// 统一设置窗口（Win11 风格：左侧导航 + 卡片分组；多选项下拉框、布尔项开关）。
 // 从歌词条右键菜单或托盘菜单的「打开设置…」进入；确定/应用后写配置并实时生效。
 using System.Text.RegularExpressions;
 using System.Windows;
@@ -11,58 +11,67 @@ public partial class SettingsWindow : Window
 {
     private readonly MainController _app;
 
-    public SettingsWindow(MainController app)
+    private sealed record NavItem(string Glyph, string Name);
+
+    public SettingsWindow(MainController app, int page = 0)
     {
         _app = app;
         InitializeComponent();
+        NavList.ItemsSource = new[]
+        {
+            new NavItem("\uE713", "通用"),
+            new NavItem("\uE189", "歌词"),
+            new NavItem("\uE771", "外观"),
+        };
+        NavList.SelectedIndex = Math.Clamp(page, 0, 2);
         LoadValues();
     }
 
     private AppConfig Cfg => _app.Cfg;
 
+    private void NavList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        PageGeneral.Visibility = NavList.SelectedIndex == 0 ? Visibility.Visible : Visibility.Collapsed;
+        PageLyrics.Visibility = NavList.SelectedIndex == 1 ? Visibility.Visible : Visibility.Collapsed;
+        PageAppearance.Visibility = NavList.SelectedIndex == 2 ? Visibility.Visible : Visibility.Collapsed;
+        PageScroller.ScrollToTop();
+    }
+
     private void LoadValues()
     {
         var cfg = Cfg;
-        ModeTaskbar.IsChecked = cfg.Mode == "taskbar";
-        ModeFloating.IsChecked = cfg.Mode != "taskbar";
+        ModeCombo.SelectedIndex = cfg.Mode == "taskbar" ? 0 : 1;
 
         var mons = NativeMethods.Monitors();
         for (var i = 0; i < mons.Count; i++)
         {
             var m = mons[i];
-            MonitorBox.Items.Add($"显示器 {i + 1}（{m.Rect.Width}x{m.Rect.Height}）" + (m.Primary ? "（主）" : ""));
+            MonitorCombo.Items.Add($"显示器 {i + 1}（{m.Rect.Width}x{m.Rect.Height}）" + (m.Primary ? "（主）" : ""));
         }
-        MonitorBox.SelectedIndex = Math.Clamp(cfg.Monitor, 0, Math.Max(0, mons.Count - 1));
+        MonitorCombo.SelectedIndex = Math.Clamp(cfg.Monitor, 0, Math.Max(0, mons.Count - 1));
 
-        LockedCheck.IsChecked = cfg.Locked;
-        HideFullscreenCheck.IsChecked = cfg.HideOnFullscreen;
-        AutostartCheck.IsChecked = Autostart.IsEnabled();
+        HideFullscreenSwitch.IsChecked = cfg.HideOnFullscreen;
+        LockedSwitch.IsChecked = cfg.Locked;
+        AutostartSwitch.IsChecked = Autostart.IsEnabled();
 
-        SecondTranslation.IsChecked = cfg.SecondLine == "translation";
-        SecondRomaji.IsChecked = cfg.SecondLine == "romaji";
-        SecondOff.IsChecked = cfg.SecondLine != "translation" && cfg.SecondLine != "romaji";
-        KaraokeCheck.IsChecked = cfg.Karaoke;
-        ShowCoverCheck.IsChecked = cfg.ShowCover;
-        ShowControlsCheck.IsChecked = cfg.ShowControls;
+        SecondLineCombo.SelectedIndex = cfg.SecondLine == "romaji" ? 1 : cfg.SecondLine == "off" ? 2 : 0;
+        KaraokeSwitch.IsChecked = cfg.Karaoke;
         OffsetBox.Text = (cfg.OffsetMs / 1000.0).ToString("0.0");
 
-        SourceAuto.IsChecked = cfg.PlayerSource == "auto";
-        SourceNetease.IsChecked = cfg.PlayerSource == "netease";
-        SourceOthers.IsChecked = cfg.PlayerSource == "others";
+        SourceCombo.SelectedIndex = cfg.PlayerSource == "netease" ? 1 : cfg.PlayerSource == "others" ? 2 : 0;
         BlockButton.Content = _app.BlockCurrentLabel();
 
         foreach (var f in Fonts.SystemFontFamilies)
-            FontBox.Items.Add(f.Source);
-        FontBox.Text = cfg.FontFamily;
+            FontCombo.Items.Add(f.Source);
+        FontCombo.Text = cfg.FontFamily;
         FontSizeBox.Text = cfg.FontSize.ToString();
-        AlignCenter.IsChecked = cfg.TextAlign != "left";
-        AlignLeft.IsChecked = cfg.TextAlign == "left";
-        foreach (var w in new[] { 420, 560, 700 })
-            WidthBox.Items.Add(w.ToString());
-        WidthBox.Text = cfg.Width.ToString();
+        AlignCombo.SelectedIndex = cfg.TextAlign == "left" ? 1 : 0;
+        WidthCombo.Text = cfg.Width.ToString();
         TextColorBox.Text = cfg.TextColor;
         TransColorBox.Text = cfg.TransColor;
-        ShadowCheck.IsChecked = cfg.Shadow;
+        ShadowSwitch.IsChecked = cfg.Shadow;
+        ShowCoverSwitch.IsChecked = cfg.ShowCover;
+        ShowControlsSwitch.IsChecked = cfg.ShowControls;
         UpdateSwatches();
     }
 
@@ -84,11 +93,8 @@ public partial class SettingsWindow : Window
 
     private void ColorBox_TextChanged(object sender, TextChangedEventArgs e) => UpdateSwatches();
 
-    private string SelectedSecondLine() =>
-        SecondRomaji.IsChecked == true ? "romaji" : SecondOff.IsChecked == true ? "off" : "translation";
-
-    private string SelectedSource() =>
-        SourceNetease.IsChecked == true ? "netease" : SourceOthers.IsChecked == true ? "others" : "auto";
+    private static readonly string[] SecondLineValues = { "translation", "romaji", "off" };
+    private static readonly string[] SourceValues = { "auto", "netease", "others" };
 
     private bool Apply()
     {
@@ -97,7 +103,7 @@ public partial class SettingsWindow : Window
             MessageBox.Show("字号需为 8~24 的整数", "任务栏歌词", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
         }
-        if (!int.TryParse(WidthBox.Text, out var width) || width < 200 || width > 2000)
+        if (!int.TryParse(WidthCombo.Text, out var width) || width < 200 || width > 2000)
         {
             MessageBox.Show("最大宽度需为 200~2000 的整数", "任务栏歌词", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
@@ -114,29 +120,31 @@ public partial class SettingsWindow : Window
         }
 
         var cfg = Cfg;
-        var secondLineChanged = cfg.SecondLine != SelectedSecondLine();
-        var karaokeChanged = cfg.Karaoke != (KaraokeCheck.IsChecked == true);
+        var secondLine = SecondLineValues[Math.Clamp(SecondLineCombo.SelectedIndex, 0, 2)];
+        var karaoke = KaraokeSwitch.IsChecked == true;
+        var secondLineChanged = cfg.SecondLine != secondLine;
+        var karaokeChanged = cfg.Karaoke != karaoke;
 
-        cfg.Mode = ModeFloating.IsChecked == true ? "floating" : "taskbar";
-        if (MonitorBox.SelectedIndex >= 0) cfg.Monitor = MonitorBox.SelectedIndex;
-        cfg.HideOnFullscreen = HideFullscreenCheck.IsChecked == true;
-        cfg.SecondLine = SelectedSecondLine();
-        cfg.Karaoke = KaraokeCheck.IsChecked == true;
-        cfg.ShowCover = ShowCoverCheck.IsChecked == true;
-        cfg.ShowControls = ShowControlsCheck.IsChecked == true;
+        cfg.Mode = ModeCombo.SelectedIndex == 1 ? "floating" : "taskbar";
+        if (MonitorCombo.SelectedIndex >= 0) cfg.Monitor = MonitorCombo.SelectedIndex;
+        cfg.HideOnFullscreen = HideFullscreenSwitch.IsChecked == true;
+        cfg.SecondLine = secondLine;
+        cfg.Karaoke = karaoke;
         cfg.OffsetMs = Math.Clamp((int)(offsetS * 1000), -3000, 3000);
-        cfg.PlayerSource = SelectedSource();
-        var family = FontBox.Text.Trim();
+        cfg.PlayerSource = SourceValues[Math.Clamp(SourceCombo.SelectedIndex, 0, 2)];
+        var family = FontCombo.Text.Trim();
         if (family.Length > 0) cfg.FontFamily = family;
         cfg.FontSize = fontSize;
         cfg.Width = width;
-        cfg.TextAlign = AlignLeft.IsChecked == true ? "left" : "center";
+        cfg.TextAlign = AlignCombo.SelectedIndex == 1 ? "left" : "center";
         cfg.TextColor = TextColorBox.Text.Trim();
         cfg.TransColor = TransColorBox.Text.Trim();
-        cfg.Shadow = ShadowCheck.IsChecked == true;
+        cfg.Shadow = ShadowSwitch.IsChecked == true;
+        cfg.ShowCover = ShowCoverSwitch.IsChecked == true;
+        cfg.ShowControls = ShowControlsSwitch.IsChecked == true;
 
-        _app.SetLocked(LockedCheck.IsChecked == true);
-        _app.SetAutostart(AutostartCheck.IsChecked == true);
+        _app.SetLocked(LockedSwitch.IsChecked == true);
+        _app.SetAutostart(AutostartSwitch.IsChecked == true);
         _app.SaveCfg();
         _app.ApplySettings(refetchLyrics: secondLineChanged || karaokeChanged);
         return true;

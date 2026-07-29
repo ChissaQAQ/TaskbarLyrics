@@ -22,8 +22,10 @@ public sealed class AppConfig
     // 位置
     [JsonPropertyName("mode")] public string Mode { get; set; } = "taskbar";           // taskbar | floating
     [JsonPropertyName("position")] public string Position { get; set; } = "tray_left"; // tray_left | left | center | right | custom
-    [JsonPropertyName("x_offset")] public int? XOffset { get; set; }                   // position=custom 时任务栏内 x
-    [JsonPropertyName("float_x")] public int? FloatX { get; set; }                     // 浮动模式屏幕坐标
+    [JsonPropertyName("x_offset")] public int? XOffset { get; set; }                   // position=custom 时任务栏内 x（左缘锚点）
+    [JsonPropertyName("x_center")] public int? XCenter { get; set; }                   // 居中对齐时的中心锚点（任务栏内 x）
+    [JsonPropertyName("float_x")] public int? FloatX { get; set; }                     // 浮动模式屏幕坐标（左缘锚点）
+    [JsonPropertyName("float_cx")] public int? FloatCx { get; set; }                   // 居中对齐时浮动窗中心锚点（屏幕坐标）
     [JsonPropertyName("float_y")] public int? FloatY { get; set; }
     [JsonPropertyName("monitor")] public int Monitor { get; set; } = 0;
     [JsonPropertyName("locked")] public bool Locked { get; set; }                      // 锁定后鼠标穿透

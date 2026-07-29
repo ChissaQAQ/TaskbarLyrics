@@ -46,6 +46,9 @@ public partial class OverlayWindow : Window
     private bool _showingButtons;         // 当前视觉状态：按钮在显示
     private bool _maskShown;              // 当前视觉状态：悬停遮罩在显示
     private bool IsLeftAlign => Cfg.TextAlign == "left";
+    // 居中对齐时窗口以「中心点」为锚：每行歌词宽度自适应变化时文字中心不左右漂移
+    private bool CenterAnchored => Cfg.TextAlign != "left";
+    private double _lastCoverZoneDip;     // Dock 时记录的封面区宽度（中心补偿用）
 
     // 悬停复查：窗口尺寸/位置变化会让 MouseLeave 误触发，按光标是否仍在窗口矩形内判定
     private readonly System.Windows.Threading.DispatcherTimer _hoverRecheck =
@@ -549,6 +552,7 @@ public partial class OverlayWindow : Window
         var heightDip = CurrentHeightDip();
         _lastHeightDip = heightDip;
         var coverZone = Cfg.ShowCover ? heightDip : 0;
+        _lastCoverZoneDip = coverZone;
         var buttonsZone = _showingButtons ? ButtonsWidth : 0;
         var contentW = _showingInfo ? _infoWidthDip : _lyricsWidthDip;
         // 悬停时窗口只许变宽不许变窄：否则光标会被收缩的窗口“甩”出去，悬停态来回抖动
@@ -585,31 +589,47 @@ public partial class OverlayWindow : Window
             NativeMethods.GetClientRect(tray, out var rc);
 
             int x;
-            switch (Cfg.Position)
+            var coverZonePx = (int)Math.Round(_lastCoverZoneDip * DpiScaleX());
+            if (Cfg.Position == "custom" && (Cfg.XOffset.HasValue || Cfg.XCenter.HasValue))
             {
-                case "custom" when Cfg.XOffset.HasValue:
-                    x = Cfg.XOffset.Value;
-                    break;
-                case "left":
-                    x = 8;
-                    break;
-                case "center":
-                    x = (rc.Right - widthPx) / 2;
-                    break;
-                case "right":
-                    x = rc.Right - widthPx - 8;
-                    break;
-                default: // tray_left：托盘通知区左边
-                    var rightEdge = rc.Right;
-                    if (notify != IntPtr.Zero)
-                    {
-                        NativeMethods.GetWindowRect(notify, out var nrc);
-                        var pt = new NativeMethods.POINT { X = nrc.Left, Y = nrc.Top };
-                        NativeMethods.ScreenToClient(tray, ref pt);
-                        rightEdge = pt.X;
-                    }
-                    x = rightEdge - 12 - widthPx;
-                    break;
+                if (CenterAnchored)
+                {
+                    // 旧配置迁移：只有左缘锚点时按当前窗口宽折算中心点，此刻视觉位置不变，
+                    // 之后每行宽度自适应变化都以中心点为锚（文字中心不漂移）
+                    Cfg.XCenter ??= (Cfg.XOffset ?? 0) + widthPx / 2;
+                    x = Cfg.XCenter.Value - widthPx / 2;
+                }
+                else
+                {
+                    x = Cfg.XOffset ?? Cfg.XCenter!.Value - widthPx / 2;
+                }
+            }
+            else if (Cfg.Position == "left")
+            {
+                x = 8;
+            }
+            else if (Cfg.Position == "center")
+            {
+                // 居中锚文字内容而非整窗：补偿左侧封面区，否则文字偏右半个封面宽
+                x = CenterAnchored
+                    ? (rc.Right - widthPx - coverZonePx) / 2
+                    : (rc.Right - widthPx) / 2;
+            }
+            else if (Cfg.Position == "right")
+            {
+                x = rc.Right - widthPx - 8;
+            }
+            else // tray_left：托盘通知区左边
+            {
+                var rightEdge = rc.Right;
+                if (notify != IntPtr.Zero)
+                {
+                    NativeMethods.GetWindowRect(notify, out var nrc);
+                    var pt = new NativeMethods.POINT { X = nrc.Left, Y = nrc.Top };
+                    NativeMethods.ScreenToClient(tray, ref pt);
+                    rightEdge = pt.X;
+                }
+                x = rightEdge - 12 - widthPx;
             }
             x = Math.Clamp(x, 0, Math.Max(0, rc.Right - widthPx));
             // 不带 SWP_NOZORDER：断言为任务栏子窗口最顶层，
@@ -622,9 +642,14 @@ public partial class OverlayWindow : Window
             NativeMethods.MakePopup(_hwnd, topmost: true);
             Topmost = true;
             int x, y;
-            if (Cfg.FloatX.HasValue && Cfg.FloatY.HasValue)
+            // 居中对齐的中心锚点迁移（同任务栏 custom）：旧 float_x 左缘折算为中心点
+            if (CenterAnchored && !Cfg.FloatCx.HasValue && Cfg.FloatX.HasValue)
+                Cfg.FloatCx = Cfg.FloatX.Value + widthPx / 2;
+            if (Cfg.FloatY.HasValue && (Cfg.FloatX.HasValue || Cfg.FloatCx.HasValue))
             {
-                x = Cfg.FloatX.Value;
+                x = CenterAnchored && Cfg.FloatCx.HasValue
+                    ? Cfg.FloatCx.Value - widthPx / 2
+                    : (Cfg.FloatX ?? Cfg.FloatCx!.Value - widthPx / 2);
                 y = Cfg.FloatY.Value;
             }
             else
@@ -667,17 +692,38 @@ public partial class OverlayWindow : Window
         NativeMethods.GetCursorPos(out var pt);
         var dx = pt.X - _dragCursor0.X;
         var dy = pt.Y - _dragCursor0.Y;
+        var widthPx = (int)Math.Round(_displayWidthDip * DpiScaleX());
         if (Cfg.Mode == "taskbar")
         {
             var (tray, _) = NativeMethods.ResolveTaskbar(Cfg.Monitor);
             if (tray == IntPtr.Zero) return;
             NativeMethods.GetWindowRect(tray, out var trc);
             Cfg.Position = "custom";
-            Cfg.XOffset = _dragWinX0 - trc.Left + dx;
+            var left = _dragWinX0 - trc.Left + dx;
+            if (CenterAnchored)
+            {
+                Cfg.XCenter = left + widthPx / 2; // 居中模式锚中心点
+                Cfg.XOffset = null;
+            }
+            else
+            {
+                Cfg.XOffset = left;
+                Cfg.XCenter = null;
+            }
         }
         else
         {
-            Cfg.FloatX = _dragWinX0 + dx;
+            var left = _dragWinX0 + dx;
+            if (CenterAnchored)
+            {
+                Cfg.FloatCx = left + widthPx / 2;
+                Cfg.FloatX = null;
+            }
+            else
+            {
+                Cfg.FloatX = left;
+                Cfg.FloatCx = null;
+            }
             Cfg.FloatY = _dragWinY0 + dy;
         }
         Dock();
