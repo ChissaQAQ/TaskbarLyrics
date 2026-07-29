@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!-- 需要 windows10.0.19041.0 目标才能使用 WinRT SMTC API（Windows.Media.Control），
+         使用 SDK 内置的 Windows 目标包，不引入第三方 NuGet -->
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\icon.ico</ApplicationIcon>
+    <AssemblyName>TaskbarLyrics</AssemblyName>
+    <RootNamespace>TaskbarLyrics</RootNamespace>
+  </PropertyGroup>
+
+  <!-- 避免 WinForms/Drawing 的隐式 using 与 WPF 类型（Color/Brush/Application 等）冲突；
+       TrayIcon.cs 里已显式 using System.Windows.Forms -->
+  <ItemGroup>
+    <Using Remove="System.Drawing" />
+    <Using Remove="System.Windows.Forms" />
+  </ItemGroup>
+
+</Project>

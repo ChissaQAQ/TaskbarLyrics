@@ -1,0 +1,7 @@
+<Application x:Class="TaskbarLyrics.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             ThemeMode="System">
+    <!-- ThemeMode=System：启用 .NET 内置 Fluent 主题（Win11 风格）并跟随系统明暗，
+         主要作用于设置窗口；歌词覆盖窗口的控件均为自定义模板且显式指定画刷，不受影响 -->
+</Application>
