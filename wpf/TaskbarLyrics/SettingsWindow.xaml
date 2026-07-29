@@ -17,6 +17,158 @@
                          Color="{DynamicResource {x:Static SystemColors.ControlTextColorKey}}"/>
         <SolidColorBrush x:Key="SeparatorBrush" Opacity="0.14"
                          Color="{DynamicResource {x:Static SystemColors.ControlTextColorKey}}"/>
+        <!-- 下拉框/列表项用的低透明自适应画刷 -->
+        <SolidColorBrush x:Key="ComboBorderBrush" Opacity="0.20"
+                         Color="{DynamicResource {x:Static SystemColors.ControlTextColorKey}}"/>
+        <SolidColorBrush x:Key="ComboHoverBrush" Opacity="0.05"
+                         Color="{DynamicResource {x:Static SystemColors.ControlTextColorKey}}"/>
+        <SolidColorBrush x:Key="ItemHoverBrush" Opacity="0.06"
+                         Color="{DynamicResource {x:Static SystemColors.ControlTextColorKey}}"/>
+        <SolidColorBrush x:Key="NavHoverBrush" Opacity="0.05"
+                         Color="{DynamicResource {x:Static SystemColors.ControlTextColorKey}}"/>
+        <SolidColorBrush x:Key="NavSelectedBrush" Opacity="0.08"
+                         Color="{DynamicResource {x:Static SystemColors.ControlTextColorKey}}"/>
+
+        <!-- Win11 式下拉项：圆角药丸悬停 + 选中对勾（而非左侧竖条） -->
+        <Style TargetType="ComboBoxItem">
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBoxItem">
+                        <Border x:Name="ItemBg" CornerRadius="4" Margin="1"
+                                Background="Transparent" Padding="8,0">
+                            <Grid MinHeight="28">
+                                <TextBlock x:Name="Check" Text="&#xE73E;" FontFamily="Segoe MDL2 Assets"
+                                           FontSize="11" VerticalAlignment="Center" Visibility="Collapsed"
+                                           Foreground="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+                                <ContentPresenter Margin="22,0,0,0" VerticalAlignment="Center"/>
+                            </Grid>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ItemBg" Property="Background" Value="{StaticResource ItemHoverBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="Check" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Win11 式下拉框：圆角边框 + 字形箭头；弹出层 8px 圆角 + 柔和阴影 + 淡入动画。
+             模板含 PART_EditableTextBox，可编辑下拉框（字体/最大宽度）行为不变 -->
+        <Style TargetType="ComboBox">
+            <Setter Property="Height" Value="32"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid>
+                            <ToggleButton x:Name="ToggleButton" ClickMode="Press" Focusable="False"
+                                          HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                                          IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                                <ToggleButton.Template>
+                                    <ControlTemplate TargetType="ToggleButton">
+                                        <Border x:Name="Chrome" CornerRadius="4" BorderThickness="1"
+                                                Background="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"
+                                                BorderBrush="{StaticResource ComboBorderBrush}">
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="30"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Grid.Column="1" Text="&#xE70D;"
+                                                           FontFamily="Segoe MDL2 Assets" FontSize="12"
+                                                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                           Foreground="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
+                                            </Grid>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Chrome" Property="Background"
+                                                        Value="{StaticResource ComboHoverBrush}"/>
+                                            </Trigger>
+                                            <Trigger Property="IsEnabled" Value="False">
+                                                <Setter TargetName="Chrome" Property="Opacity" Value="0.5"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </ToggleButton.Template>
+                            </ToggleButton>
+                            <ContentPresenter x:Name="ContentSite"
+                                              Content="{TemplateBinding SelectionBoxItem}"
+                                              ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                              ContentStringFormat="{TemplateBinding SelectionBoxItemStringFormat}"
+                                              Margin="11,0,30,0" VerticalAlignment="Center"
+                                              IsHitTestVisible="False"
+                                              TextElement.Foreground="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}"/>
+                            <TextBox x:Name="PART_EditableTextBox" Style="{x:Null}"
+                                     Background="Transparent" BorderThickness="0"
+                                     Padding="11,0,30,0" VerticalContentAlignment="Center"
+                                     HorizontalAlignment="Stretch" Visibility="Collapsed"
+                                     Foreground="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}"
+                                     CaretBrush="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}"/>
+                            <Popup x:Name="PART_Popup" Placement="Bottom"
+                                   IsOpen="{TemplateBinding IsDropDownOpen}"
+                                   AllowsTransparency="True" PopupAnimation="Fade" VerticalOffset="4">
+                                <Border CornerRadius="8" Padding="5,4"
+                                        Background="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"
+                                        BorderBrush="{StaticResource ComboBorderBrush}" BorderThickness="1"
+                                        MinWidth="{TemplateBinding ActualWidth}" MaxHeight="300"
+                                        SnapsToDevicePixels="True" UseLayoutRounding="True">
+                                    <Border.Effect>
+                                        <DropShadowEffect BlurRadius="18" ShadowDepth="5" Opacity="0.22"
+                                                          Color="Black" Direction="270"/>
+                                    </Border.Effect>
+                                    <ScrollViewer CanContentScroll="True" VerticalScrollBarVisibility="Auto"
+                                                  Focusable="False">
+                                        <ItemsPresenter SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}"/>
+                                    </ScrollViewer>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsEditable" Value="True">
+                                <Setter TargetName="ContentSite" Property="Visibility" Value="Collapsed"/>
+                                <Setter TargetName="PART_EditableTextBox" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Win11 式导航项：圆角填充 + 选中时左侧 accent 小竖条 -->
+        <Style x:Key="NavItem" TargetType="ListBoxItem">
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="Margin" Value="1"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListBoxItem">
+                        <Border x:Name="Bg" CornerRadius="5" Background="Transparent">
+                            <Grid>
+                                <Border x:Name="Pill" Width="3" Height="18" CornerRadius="1.5"
+                                        HorizontalAlignment="Left" VerticalAlignment="Center" Margin="4,0,0,0"
+                                        Background="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"
+                                        Visibility="Collapsed"/>
+                                <ContentPresenter Margin="10,7"/>
+                            </Grid>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bg" Property="Background" Value="{StaticResource NavHoverBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="Bg" Property="Background" Value="{StaticResource NavSelectedBrush}"/>
+                                <Setter TargetName="Pill" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
 
         <!-- Win11 式开关：滑块位移动画 + 强调色轨道 -->
         <Style x:Key="Switch" TargetType="ToggleButton">
@@ -118,7 +270,7 @@
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="Margin" Value="0,2,0,16"/>
         </Style>
-        <Style x:Key="RowCombo" TargetType="ComboBox">
+        <Style x:Key="RowCombo" TargetType="ComboBox" BasedOn="{StaticResource {x:Type ComboBox}}">
             <Setter Property="Width" Value="220"/>
             <Setter Property="VerticalAlignment" Value="Center"/>
             <Setter Property="HorizontalAlignment" Value="Right"/>
@@ -152,10 +304,11 @@
                     </StackPanel>
                     <ListBox x:Name="NavList" Grid.Row="1" Background="Transparent" BorderThickness="0"
                              ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                             ItemContainerStyle="{StaticResource NavItem}"
                              SelectionChanged="NavList_SelectionChanged">
                         <ListBox.ItemTemplate>
                             <DataTemplate>
-                                <StackPanel Orientation="Horizontal" Margin="4,6">
+                                <StackPanel Orientation="Horizontal">
                                     <TextBlock Text="{Binding Glyph}" FontFamily="Segoe MDL2 Assets"
                                                FontSize="14" Width="26" VerticalAlignment="Center"/>
                                     <TextBlock Text="{Binding Name}" FontSize="13" VerticalAlignment="Center"/>

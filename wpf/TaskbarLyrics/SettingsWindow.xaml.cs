@@ -3,6 +3,7 @@
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Interop;
 using System.Windows.Media;
 
 namespace TaskbarLyrics;
@@ -25,6 +26,15 @@ public partial class SettingsWindow : Window
         };
         NavList.SelectedIndex = Math.Clamp(page, 0, 2);
         LoadValues();
+    }
+
+    /// <summary>Win11 22H2+ 启用 Mica 背景材质（不支持时保留 XAML 里的微灰底色）。</summary>
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        var hwnd = new WindowInteropHelper(this).Handle;
+        if (NativeMethods.TryEnableMica(hwnd))
+            Background = Brushes.Transparent; // Mica 从窗口背景透出来
     }
 
     private AppConfig Cfg => _app.Cfg;

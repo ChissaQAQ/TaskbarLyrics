@@ -100,6 +100,19 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
 
+    // ---- DWM ----
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int dwAttribute, ref int pvAttribute, int cbAttribute);
+
+    /// <summary>启用 Mica 背景材质（Win11 22H2+）。成功返回 true，调用方应把窗口背景设为透明。</summary>
+    public static bool TryEnableMica(IntPtr hwnd)
+    {
+        if (Environment.OSVersion.Version.Build < 22621) return false;
+        var backdrop = 2; // DWMSBT_MAINWINDOW = Mica
+        return DwmSetWindowAttribute(hwnd, 38 /* DWMWA_SYSTEMBACKDROP_TYPE */, ref backdrop, sizeof(int)) == 0;
+    }
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern int GetClassNameW(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
 
