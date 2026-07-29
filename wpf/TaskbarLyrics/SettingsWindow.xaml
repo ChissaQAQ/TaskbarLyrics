@@ -71,8 +71,7 @@
                                         Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
                                 <Setter TargetName="Track" Property="BorderBrush"
                                         Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
-                                <Setter TargetName="Knob" Property="Fill"
-                                        Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+                                <Setter TargetName="Knob" Property="Fill" Value="White"/>
                             </Trigger>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="Track" Property="Opacity" Value="0.85"/>
@@ -470,7 +469,7 @@
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button Content="确定" Width="88" Margin="8,0,0,0" Click="Ok_Click" IsDefault="True"
                         Background="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"
-                        Foreground="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"
+                        Foreground="White"
                         BorderThickness="0"/>
                 <Button Content="应用" Width="88" Margin="8,0,0,0" Click="Apply_Click"/>
                 <Button Content="取消" Width="88" Margin="8,0,0,0" Click="Cancel_Click" IsCancel="True"/>

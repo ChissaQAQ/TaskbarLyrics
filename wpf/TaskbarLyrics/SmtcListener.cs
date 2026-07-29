@@ -40,6 +40,14 @@ public sealed class PlaybackState
         return Math.Max(pos, 0.0);
     }
 
+    /// <summary>未按时长截断的插值进度（单曲循环重播检测用：
+    /// 截断后的进度永不超过 DurationS，无法区分「长尾奏」与「真的重播了」）。</summary>
+    public double CurrentPositionUnclampedS()
+    {
+        var pos = Playing ? BasePositionS + (Clock.Now - BaseTime) : BasePositionS;
+        return Math.Max(pos, 0.0);
+    }
+
     /// <summary>同一首歌且 SMTC 进度没变化（网易云不上报进度）时，沿用本地计时。</summary>
     public void MergeFrom(PlaybackState? prev)
     {
@@ -156,8 +164,10 @@ public static class SmtcListener
                     case "prev": await session.TrySkipPreviousAsync(); break;
                     case "next": await session.TrySkipNextAsync(); break;
                     case "play_pause":
+                        // 每条命令后翻转本地状态：连按两次应是 暂停→播放，而不是两次相同命令
                         if (lastPlaying) await session.TryPauseAsync();
                         else await session.TryPlayAsync();
+                        lastPlaying = !lastPlaying;
                         break;
                 }
             }

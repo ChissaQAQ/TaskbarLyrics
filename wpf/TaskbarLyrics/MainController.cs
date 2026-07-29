@@ -57,6 +57,10 @@ public sealed class MainController : IDisposable
         _overlay.Show();
         _tray = new TrayIcon(this);
 
+        // 自启路径自愈：exe 挪位置后注册表里的旧路径会静默失效，启动时幂等刷新
+        try { if (Autostart.IsEnabled()) Autostart.SetEnabled(true); }
+        catch (SystemException) { /* 注册表写失败不致命 */ }
+
         _lyricsTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
         _lyricsTimer.Tick += (_, _) => OnLyricsTick();
         _lyricsTimer.Start();
@@ -234,8 +238,13 @@ public sealed class MainController : IDisposable
         if (lines is { Count: > 0 })
         {
             var posMs = Math.Max(0, (int)(state.CurrentPositionS() * 1000) + Cfg.OffsetMs);
-            // 单曲循环检测：进度远超最后一句歌词 → 判定为重播，计时归零
-            if (!_replayed && posMs > lines[^1].Ms + 20000)
+            // 单曲循环检测：插值进度超过歌曲时长 → 判定为重播，计时归零。
+            // 必须用未截断进度：截断进度永不超过 DurationS，
+            // 长尾奏（>20s）歌曲会在第一次播放的尾奏里被误判成重播
+            var unclampedMs = (int)(state.CurrentPositionUnclampedS() * 1000);
+            if (!_replayed && (state.DurationS > 0
+                    ? unclampedMs > (int)(state.DurationS * 1000) + 2000
+                    : posMs > lines[^1].Ms + 20000)) // 时长未知时退回旧启发式
             {
                 _replayed = true;
                 state.BasePositionS = 0.0;
@@ -321,7 +330,7 @@ public sealed class MainController : IDisposable
     {
         Cfg.Locked = locked;
         SaveCfg();
-        Overlay.SetLocked(locked);
+        _overlay?.SetLocked(locked); // --settings 模式下无覆盖层
     }
 
     public void SetAutostart(bool enabled)

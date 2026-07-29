@@ -118,6 +118,12 @@ public partial class OverlayWindow : Window
         _translation = translation;
         SetHasContent(original.Length > 0);
 
+        // 切行先清掉上一行的译文滚动状态：新行无译文时，
+        // 残留状态会让跟随滚动逻辑在已移除的旧元素上空跑
+        _transTb = null;
+        _transOverflow = 0;
+        _lastTransScroll = 0;
+
         var oldLine = _currentLine;
         var oldSb = _karaokeStoryboard;
         _karaokeStoryboard = null;
