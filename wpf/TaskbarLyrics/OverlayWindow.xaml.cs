@@ -584,9 +584,13 @@ public partial class OverlayWindow : Window
 
         _displayWidthDip = targetWidth;
         Width = targetWidth;
-        // 悬停遮罩只包实际内容（封面+按钮+当前文字区）：窗口为防甩动会保留歌词宽度，
-        // 遮罩若铺满全窗会显得比文字宽一截
-        HoverMask.Width = Math.Max(24, coverZone + buttonsZone + contentW - 4);
+        FloatBg.Visibility = Cfg.Mode == "taskbar" ? Visibility.Collapsed : Visibility.Visible;
+        // 悬停遮罩只包实际内容（封面+按钮+当前显示的文字）：窗口为防甩动会保留
+        // 歌词宽度（长歌词时=最大宽度），遮罩若按窗口铺会显得比文字宽一截；
+        // 居中对齐时文字在加宽内容区里居中，遮罩要加上这段偏移
+        var displayedW = _showingInfo ? _infoWidthDip : _lyricsWidthDip;
+        var textOffset = IsLeftAlign ? 0 : Math.Max(0, (contentW - displayedW) / 2);
+        HoverMask.Width = Math.Max(24, coverZone + buttonsZone + textOffset + displayedW - 4);
         ApplyPosition();
     }
 

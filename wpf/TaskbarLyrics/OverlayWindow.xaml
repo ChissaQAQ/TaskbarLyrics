@@ -39,6 +39,10 @@
           TextOptions.TextFormattingMode="Display"
           RenderOptions.ClearTypeHint="Enabled"
           UseLayoutRounding="True">
+        <!-- 浮动模式底色：半透明深色圆角底（仅浮动模式显示），
+             遮住分层窗逐帧重绘的闪烁感，也让整个条可拖动（不再只能抓文字） -->
+        <Border x:Name="FloatBg" CornerRadius="8" Background="#B3222226"
+                Margin="1" Visibility="Collapsed"/>
         <!-- 悬停遮罩：淡白圆角底（对标 Win11 任务栏图标悬停），
              Margin 内缩，范围略小于任务栏高度，平时透明 -->
         <Border x:Name="HoverMask" Background="#26FFFFFF" CornerRadius="6"

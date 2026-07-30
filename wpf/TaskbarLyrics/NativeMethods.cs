@@ -14,6 +14,7 @@ internal static class NativeMethods
     public const long WS_VISIBLE = 0x10000000L;
     public const long WS_EX_TOPMOST = 0x00000008L;
     public const long WS_EX_TRANSPARENT = 0x00000020L;
+    public const long WS_EX_NOACTIVATE = 0x08000000L; // 点击不激活（浮动窗永远不拿焦点）
 
     public const uint SWP_NOSIZE = 0x0001;
     public const uint SWP_NOMOVE = 0x0002;
@@ -189,7 +190,11 @@ internal static class NativeMethods
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         }
         long exstyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
-        var newExstyle = topmost ? exstyle | WS_EX_TOPMOST : exstyle & ~WS_EX_TOPMOST;
+        // 浮动窗加 NOACTIVATE：点击/拖动都不会被激活成前台窗，
+        // 激活-失焦切换引起的闪烁从源头消失
+        var newExstyle = topmost
+            ? exstyle | WS_EX_TOPMOST | WS_EX_NOACTIVATE
+            : exstyle & ~WS_EX_TOPMOST | WS_EX_NOACTIVATE;
         if (newExstyle != exstyle)
             SetWindowLongPtr(hwnd, GWL_EXSTYLE, newExstyle);
     }
