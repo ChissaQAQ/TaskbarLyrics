@@ -66,6 +66,9 @@ public partial class SettingsWindow : Window
         AutoAlignCombo.SelectedIndex = cfg.AutoAlign == "right" ? 1 : cfg.AutoAlign == "center" ? 2 : 0;
         LockedSwitch.IsChecked = cfg.Locked;
         AutostartSwitch.IsChecked = Autostart.IsEnabled();
+        VersionText.Text = $"v{Updater.CurrentVersion}";
+        UpdateCheckSwitch.IsChecked = cfg.UpdateCheck;
+        RefreshUpdateUi();
 
         SecondLineCombo.SelectedIndex = cfg.SecondLine == "romaji" ? 1 : cfg.SecondLine == "off" ? 2 : 0;
         KaraokeSwitch.IsChecked = cfg.Karaoke;
@@ -165,6 +168,7 @@ public partial class SettingsWindow : Window
         cfg.Shadow = ShadowSwitch.IsChecked == true;
         cfg.ShowCover = ShowCoverSwitch.IsChecked == true;
         cfg.ShowControls = ShowControlsSwitch.IsChecked == true;
+        cfg.UpdateCheck = UpdateCheckSwitch.IsChecked == true;
 
         _app.SetLocked(LockedSwitch.IsChecked == true);
         _app.SetAutostart(AutostartSwitch.IsChecked == true);
@@ -190,5 +194,41 @@ public partial class SettingsWindow : Window
     {
         _app.ToggleBlockCurrent();
         BlockButton.Content = _app.BlockCurrentLabel();
+    }
+
+    // ---- 检查更新 ----
+
+    private void RefreshUpdateUi()
+    {
+        if (_app.PendingUpdate is { } rel)
+        {
+            UpdateStatusText.Text = $"发现新版本 {rel.Tag}";
+            UpdateButton.Content = "立即更新";
+        }
+        else
+        {
+            UpdateButton.Content = "检查更新";
+        }
+        UpdateButton.IsEnabled = true;
+    }
+
+    private async void UpdateButton_Click(object sender, RoutedEventArgs e)
+    {
+        UpdateButton.IsEnabled = false;
+        if (_app.PendingUpdate != null)
+        {
+            UpdateStatusText.Text = "正在下载更新…（完成后自动重启）";
+            var msg = await _app.DownloadAndApplyAsync();
+            if (msg.Length > 0) // 只有失败才返回文案（成功则进程已退出，新版自动启动）
+            {
+                UpdateStatusText.Text = msg;
+                UpdateButton.IsEnabled = true;
+            }
+            return;
+        }
+        UpdateStatusText.Text = "正在检查…";
+        var status = await _app.CheckForUpdateAsync();
+        RefreshUpdateUi();
+        UpdateStatusText.Text = status;
     }
 }

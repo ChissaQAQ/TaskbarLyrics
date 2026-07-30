@@ -61,6 +61,14 @@ public sealed class MainController : IDisposable
         try { if (Autostart.IsEnabled()) Autostart.SetEnabled(true); }
         catch (SystemException) { /* 注册表写失败不致命 */ }
 
+        Updater.Cleanup(); // 清掉上次更新留下的临时新 exe
+        if (Cfg.UpdateCheck) // 启动时自动检查更新（发现新版本 → 右键菜单出现更新入口）
+            _ = Task.Run(async () =>
+            {
+                try { await CheckForUpdateAsync(); }
+                catch { /* 启动检查失败静默 */ }
+            });
+
         _lyricsTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
         _lyricsTimer.Tick += (_, _) => OnLyricsTick();
         _lyricsTimer.Start();
@@ -340,6 +348,46 @@ public sealed class MainController : IDisposable
         Cfg.AutoPosition = !Cfg.AutoPosition;
         SaveCfg();
         ApplySettings(refetchLyrics: false);
+    }
+
+    // ---- 检查更新 ----
+
+    /// <summary>发现的新版本（右键菜单/设置页据此显示更新入口）。</summary>
+    public ReleaseInfo? PendingUpdate { get; private set; }
+    private bool _updating;
+
+    /// <summary>检查更新，返回状态文案；有更新时写入 PendingUpdate。</summary>
+    public async Task<string> CheckForUpdateAsync()
+    {
+        try
+        {
+            var (latest, hasUpdate) = await Updater.CheckLatestAsync();
+            if (latest == null) return "检查失败，请稍后重试";
+            PendingUpdate = hasUpdate ? latest : null;
+            return hasUpdate ? $"发现新版本 {latest.Tag}" : $"已是最新版本（v{Updater.CurrentVersion}）";
+        }
+        catch
+        {
+            return "检查失败，请稍后重试";
+        }
+    }
+
+    /// <summary>下载并接力替换更新：成功后本进程退出、新版自动启动。</summary>
+    public async Task<string> DownloadAndApplyAsync()
+    {
+        if (PendingUpdate == null || _updating) return "";
+        _updating = true;
+        try
+        {
+            var path = await Updater.DownloadAsync(PendingUpdate.AssetUrl);
+            Updater.StartApplyAndExit(path, Quit); // 里面会退出本进程
+            return "";
+        }
+        catch
+        {
+            _updating = false;
+            return "下载失败，请稍后重试";
+        }
     }
 
     public void SetAutostart(bool enabled)

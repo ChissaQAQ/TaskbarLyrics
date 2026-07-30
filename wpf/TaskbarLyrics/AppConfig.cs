@@ -40,6 +40,8 @@ public sealed class AppConfig
     [JsonPropertyName("offset_ms")] public int OffsetMs { get; set; } = 0;             // 歌词时间偏移（提前为负）
     // 行为
     [JsonPropertyName("hide_on_fullscreen")] public bool HideOnFullscreen { get; set; } = true;
+    // 更新
+    [JsonPropertyName("update_check")] public bool UpdateCheck { get; set; } = true;   // 启动时自动检查新版本
     // 播放源
     [JsonPropertyName("player_source")] public string PlayerSource { get; set; } = "auto"; // auto | netease | others
     [JsonPropertyName("player_blocklist")] public List<string> PlayerBlocklist { get; set; } = new() { "chrome", "msedge", "firefox" };

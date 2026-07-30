@@ -24,6 +24,14 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
+        // 接力替换模式（更新用）：TaskbarLyrics-new.exe --apply-update "<目标exe>" <旧pid>
+        if (e.Args.Length >= 3 && e.Args[0] == "--apply-update")
+        {
+            Updater.ApplyUpdateMain(e.Args[1], int.Parse(e.Args[2]));
+            Shutdown(0);
+            return;
+        }
+
         // 控制台验证入口：TaskbarLyrics.exe --lyrics-test "Lemon" "米津玄師"
         if (e.Args.Length >= 2 && e.Args[0] == "--lyrics-test")
         {

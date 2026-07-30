@@ -437,6 +437,46 @@
                                 </Grid>
                             </StackPanel>
                         </Border>
+                        <TextBlock Style="{StaticResource CardHeader}" Text="更新"/>
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <Grid Style="{StaticResource Row}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                                        <TextBlock Style="{StaticResource RowTitle}" Text="当前版本"/>
+                                    </StackPanel>
+                                    <TextBlock x:Name="VersionText" Grid.Column="1" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
+                                </Grid>
+                                <Border Style="{StaticResource RowSeparator}"/>
+                                <Grid Style="{StaticResource Row}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                                        <TextBlock Style="{StaticResource RowTitle}" Text="自动检查更新"/>
+                                        <TextBlock Style="{StaticResource RowDesc}" Text="启动时自动检查新版本，发现后右键菜单出现更新入口"/>
+                                    </StackPanel>
+                                    <ToggleButton x:Name="UpdateCheckSwitch" Grid.Column="1" Style="{StaticResource Switch}"
+                                                  VerticalAlignment="Center"/>
+                                </Grid>
+                                <Border Style="{StaticResource RowSeparator}"/>
+                                <Grid Style="{StaticResource Row}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                                        <TextBlock Style="{StaticResource RowTitle}" Text="检查更新"/>
+                                        <TextBlock x:Name="UpdateStatusText" Style="{StaticResource RowDesc}" Text=""/>
+                                    </StackPanel>
+                                    <Button x:Name="UpdateButton" Grid.Column="1" Content="检查更新"
+                                            HorizontalAlignment="Right" VerticalAlignment="Center"
+                                            Padding="12,5" Click="UpdateButton_Click"/>
+                                </Grid>
+                            </StackPanel>
+                        </Border>
                     </StackPanel>
 
                     <!-- 歌词 -->

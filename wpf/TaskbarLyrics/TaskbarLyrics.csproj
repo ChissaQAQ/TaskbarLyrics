@@ -13,6 +13,8 @@
     <ApplicationIcon>Assets\icon.ico</ApplicationIcon>
     <AssemblyName>TaskbarLyrics</AssemblyName>
     <RootNamespace>TaskbarLyrics</RootNamespace>
+    <!-- 发布版本号：打 tag 发 release 时同步递增（检查更新以此对比） -->
+    <Version>1.0.15</Version>
   </PropertyGroup>
 
   <!-- 避免 WinForms/Drawing 的隐式 using 与 WPF 类型（Color/Brush/Application 等）冲突；

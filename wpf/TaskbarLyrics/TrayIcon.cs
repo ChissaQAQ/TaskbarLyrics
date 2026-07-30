@@ -57,6 +57,14 @@ public sealed class TrayIcon : IDisposable
             return mi;
         }
 
+        // 有新版本时菜单顶部显示更新入口
+        if (_app.PendingUpdate is { } rel)
+        {
+            menu.Items.Add(Item($"发现新版本 {rel.Tag}（点击更新）", false,
+                () => _ = _app.DownloadAndApplyAsync()));
+            menu.Items.Add(new Separator());
+        }
+
         menu.Items.Add(Item("任务栏模式", cfg.Mode == "taskbar", () => _app.SetMode("taskbar")));
         menu.Items.Add(Item("浮动模式", cfg.Mode == "floating", () => _app.SetMode("floating")));
         menu.Items.Add(Item("锁定位置（鼠标穿透）", cfg.Locked, () => _app.SetLocked(!cfg.Locked)));
