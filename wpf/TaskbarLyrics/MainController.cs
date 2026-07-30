@@ -254,9 +254,9 @@ public sealed class MainController : IDisposable
             var (index, orig, trans) = Lyrics.CurrentLine(lines, posMs);
             if (index < 0)
             {
-                // 还没到第一句（前奏）：显示歌名-歌手占位，不隐藏窗口
-                original = state.Artist.Length > 0 ? $"{state.Title} - {state.Artist}" : state.Title;
-                translation = "";
+                // 还没到第一句（前奏）：上行歌名、下行歌手两行显示，与闲置信息一致
+                original = state.Title;
+                translation = state.Artist;
             }
             else
             {
@@ -290,8 +290,9 @@ public sealed class MainController : IDisposable
         }
         else
         {
-            original = state.Artist.Length > 0 ? $"{state.Title} - {state.Artist}" : state.Title;
-            translation = "";
+            // 无歌词可用：同样上行歌名、下行歌手两行显示
+            original = state.Title;
+            translation = state.Artist;
         }
 
         var hasWords = words != null;

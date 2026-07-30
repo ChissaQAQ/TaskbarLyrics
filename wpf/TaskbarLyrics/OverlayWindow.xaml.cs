@@ -67,6 +67,8 @@ public partial class OverlayWindow : Window
     private bool _dragging;
     private NativeMethods.POINT _dragCursor0;
     private int _dragWinX0, _dragWinY0;
+    // 浮动模式上次摆放的位置尺寸：没变就不调 SetWindowPos（防分层窗重合成闪烁）
+    private int _lastFloatX = int.MinValue, _lastFloatY, _lastFloatW, _lastFloatH;
 
     private AppConfig Cfg => _app.Cfg;
 
@@ -116,7 +118,12 @@ public partial class OverlayWindow : Window
         {
             NativeMethods.GetCursorPos(out var pt);
             NativeMethods.GetWindowRect(_hwnd, out var rc);
-            inside = pt.X >= rc.Left && pt.X <= rc.Right && pt.Y >= rc.Top && pt.Y <= rc.Bottom;
+            // 退出带 4px 滞后：边界附近/窗口几何变化时悬停态不闪变
+            const int hys = 4;
+            inside = _hover
+                ? pt.X >= rc.Left - hys && pt.X <= rc.Right + hys
+                  && pt.Y >= rc.Top - hys && pt.Y <= rc.Bottom + hys
+                : pt.X >= rc.Left && pt.X <= rc.Right && pt.Y >= rc.Top && pt.Y <= rc.Bottom;
         }
         if (inside != _hover)
         {
@@ -241,15 +248,16 @@ public partial class OverlayWindow : Window
         TitleText.Text = title;
         TitleText.FontFamily = family;
         TitleText.FontSize = OrigFontDip;
-        TitleText.LineHeight = Math.Ceiling(OrigFontDip * 1.1);
+        TitleText.LineHeight = Math.Ceiling(OrigFontDip * 1.3); // 与歌词行同规则固定行高
         TitleText.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
         TitleText.Foreground = new SolidColorBrush(ParseColor(Cfg.TextColor, Colors.White));
         TitleText.HorizontalAlignment = align;
         ArtistText.Text = artist;
         ArtistText.FontFamily = family;
         ArtistText.FontSize = TransFontDip;
-        ArtistText.LineHeight = Math.Ceiling(TransFontDip * 1.1);
+        ArtistText.LineHeight = Math.Ceiling(TransFontDip * 1.3);
         ArtistText.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
+        ArtistText.Margin = new Thickness(0, 3, 0, 0); // 与歌词行相同的上下间距
         ArtistText.Foreground = new SolidColorBrush(ParseColor(Cfg.TransColor, Color.FromRgb(0xC8, 0xC8, 0xC8)));
         ArtistText.HorizontalAlignment = align;
         ArtistText.Visibility = artist.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -576,6 +584,9 @@ public partial class OverlayWindow : Window
 
         _displayWidthDip = targetWidth;
         Width = targetWidth;
+        // 悬停遮罩只包实际内容（封面+按钮+当前文字区）：窗口为防甩动会保留歌词宽度，
+        // 遮罩若铺满全窗会显得比文字宽一截
+        HoverMask.Width = Math.Max(24, coverZone + buttonsZone + contentW - 4);
         ApplyPosition();
     }
 
@@ -589,6 +600,7 @@ public partial class OverlayWindow : Window
         if (Cfg.Mode == "taskbar")
         {
             Topmost = false;
+            _lastFloatX = int.MinValue; // 模式切回浮动时强制重新摆放（父窗口/样式都变过）
             var (tray, notify) = NativeMethods.ResolveTaskbar(Cfg.Monitor);
             if (tray == IntPtr.Zero) return;
             NativeMethods.MakeChildOf(_hwnd, tray);
@@ -669,8 +681,17 @@ public partial class OverlayWindow : Window
             var (vx, vy, vw, vh) = NativeMethods.VirtualScreenRect();
             x = Math.Clamp(x, vx - widthPx + 48, vx + vw - 48);
             y = Math.Clamp(y, vy, vy + vh - 48);
+            // 位置尺寸没变就不动窗口：分层透明窗每次 SetWindowPos 都会整张重合成，
+            // 周期重摆/前台切换钩子触发的无谓调用会表现为一闪一闪；
+            // 也不需要 FRAMECHANGED（样式由 MakePopup 自己负责）
+            if (x == _lastFloatX && y == _lastFloatY && widthPx == _lastFloatW && heightPx == _lastFloatH)
+                return;
+            _lastFloatX = x;
+            _lastFloatY = y;
+            _lastFloatW = widthPx;
+            _lastFloatH = heightPx;
             NativeMethods.SetWindowPos(_hwnd, IntPtr.Zero, x, y, widthPx, heightPx,
-                NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOZORDER | NativeMethods.SWP_FRAMECHANGED);
+                NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOZORDER);
         }
     }
 
