@@ -50,8 +50,6 @@ public partial class App : Application
         // 提高系统定时器精度，DispatcherTimer 才能更准
         try { timeBeginPeriod(1); } catch { /* 不致命 */ }
         System.Windows.Forms.Application.EnableVisualStyles();
-        // 托盘右键菜单的隐形属主窗口需要能拿到前台焦点（否则菜单会失焦自关）
-        NativeMethods.AllowSetForegroundAny();
 
         _controller = new MainController();
         _controller.Run();

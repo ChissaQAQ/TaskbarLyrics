@@ -245,7 +245,10 @@ public static class SmtcListener
                         if (thumbBytes == null || Clock.Now < thumbRefreshUntil)
                         {
                             var b = await ReadThumbnailAsync(session);
-                            if (b != null) thumbBytes = b;
+                            // 内容没变（长度一致）就不换引用：主程序按引用去重上屏，
+                            // 每次轮询都换新数组会让封面在切歌后 1.5s 内重复解码重绘（闪烁）
+                            if (b != null && (thumbBytes == null || b.Length != thumbBytes.Length))
+                                thumbBytes = b;
                         }
                         state.CoverBytes = thumbBytes;
                     }
