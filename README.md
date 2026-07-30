@@ -3,9 +3,8 @@
 把网易云音乐当前播放歌曲的同步歌词，**原生显示在 Windows 任务栏里**
 （窗口是任务栏的子窗口，不是悬浮窗）。对标 Lyricify Lite 的视觉与动画体验。
 
-> **主版本为 WPF（.NET 10）**：`wpf/publish/TaskbarLyrics.exe`，
+> WPF（.NET 10）实现：`wpf/publish/TaskbarLyrics.exe`，
 > 动画全部由 GPU 合成器渲染，丝滑不卡。
-> 根目录的 Python 版（`dist/TaskbarLyrics.exe`）保留作备份，不再更新。
 
 ## 使用方法
 
@@ -68,14 +67,10 @@
 ## 开发
 
 ```powershell
-# WPF 版（主版本）
 dotnet build wpf/TaskbarLyrics -c Release
 dotnet publish wpf/TaskbarLyrics -c Release -r win-x64 --self-contained false `
   -p:PublishSingleFile=true -o wpf/publish
 
 # 歌词抓取控制台验证
 wpf/publish/TaskbarLyrics.exe --lyrics-test "歌名" "歌手"
-
-# Python 旧版（备份，不再更新）
-.venv/Scripts/python.exe main.py
 ```
