@@ -669,11 +669,15 @@ public partial class OverlayWindow : Window
             var coverZonePx = (int)Math.Round(_lastCoverZoneDip * DpiScaleX());
             if (_autoGap.HasValue)
             {
-                // 自动避让：钉停靠侧的边缘（右半边靠托盘、左半边靠开始按钮），各留 4px。
-                // 窗口宽度随行不变（填充式），文字位置因此也逐行稳定；
-                // 悬停加宽时右钉向左扩，文字原地不动
+                // 自动避让：按「停靠对齐」钉空档的边缘/居中（各留 4px）。
+                // 默认左对齐钉左缘：悬停加按钮时窗口向右扩，封面不推图标
                 var g = _autoGap.Value;
-                x = Cfg.AutoSide == "left" ? g.L + 4 : g.R - 4 - widthPx;
+                x = Cfg.AutoAlign switch
+                {
+                    "right" => g.R - 4 - widthPx,
+                    "center" => (g.L + g.R - widthPx) / 2,
+                    _ => g.L + 4,
+                };
             }
             else if (Cfg.Position == "custom" && (Cfg.XOffset.HasValue || Cfg.XCenter.HasValue))
             {

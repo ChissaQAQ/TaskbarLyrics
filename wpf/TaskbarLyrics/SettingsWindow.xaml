@@ -386,6 +386,21 @@
                                         <ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                                        <TextBlock Style="{StaticResource RowTitle}" Text="停靠对齐"/>
+                                        <TextBlock Style="{StaticResource RowDesc}" Text="窗口在空档内的停靠位置；左对齐贴图标侧，悬停展开按钮时不推图标"/>
+                                    </StackPanel>
+                                    <ComboBox x:Name="AutoAlignCombo" Grid.Column="1" Style="{StaticResource RowCombo}">
+                                        <ComboBoxItem Content="左对齐"/>
+                                        <ComboBoxItem Content="右对齐"/>
+                                        <ComboBoxItem Content="居中"/>
+                                    </ComboBox>
+                                </Grid>
+                                <Border Style="{StaticResource RowSeparator}"/>
+                                <Grid Style="{StaticResource Row}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
                                         <TextBlock Style="{StaticResource RowTitle}" Text="全屏时自动隐藏"/>
                                         <TextBlock Style="{StaticResource RowDesc}" Text="全屏应用（如游戏）在前台且与歌词同屏时隐藏"/>
                                     </StackPanel>
