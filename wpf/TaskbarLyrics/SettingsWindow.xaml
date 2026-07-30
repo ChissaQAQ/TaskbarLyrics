@@ -372,6 +372,20 @@
                                         <ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                                        <TextBlock Style="{StaticResource RowTitle}" Text="避让停靠侧"/>
+                                        <TextBlock Style="{StaticResource RowDesc}" Text="自动避让时优先停靠在任务栏的哪半边；空间恢复后会自动回到这边"/>
+                                    </StackPanel>
+                                    <ComboBox x:Name="AutoSideCombo" Grid.Column="1" Style="{StaticResource RowCombo}">
+                                        <ComboBoxItem Content="右半边"/>
+                                        <ComboBoxItem Content="左半边"/>
+                                    </ComboBox>
+                                </Grid>
+                                <Border Style="{StaticResource RowSeparator}"/>
+                                <Grid Style="{StaticResource Row}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
                                         <TextBlock Style="{StaticResource RowTitle}" Text="全屏时自动隐藏"/>
                                         <TextBlock Style="{StaticResource RowDesc}" Text="全屏应用（如游戏）在前台且与歌词同屏时隐藏"/>
                                     </StackPanel>

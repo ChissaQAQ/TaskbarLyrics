@@ -23,6 +23,7 @@ public sealed class AppConfig
     [JsonPropertyName("mode")] public string Mode { get; set; } = "taskbar";           // taskbar | floating
     [JsonPropertyName("position")] public string Position { get; set; } = "tray_left"; // tray_left | left | center | right | custom
     [JsonPropertyName("auto_position")] public bool AutoPosition { get; set; }         // 自动避让任务栏元素（覆盖 position）
+    [JsonPropertyName("auto_side")] public string AutoSide { get; set; } = "right";    // 避让停靠侧：left | right（优先待在哪半边）
     [JsonPropertyName("x_offset")] public int? XOffset { get; set; }                   // position=custom 时任务栏内 x（左缘锚点）
     [JsonPropertyName("x_center")] public int? XCenter { get; set; }                   // 居中对齐时的中心锚点（任务栏内 x）
     [JsonPropertyName("float_x")] public int? FloatX { get; set; }                     // 浮动模式屏幕坐标（左缘锚点）

@@ -60,6 +60,7 @@ public sealed class TrayIcon : IDisposable
         menu.Items.Add(Item("任务栏模式", cfg.Mode == "taskbar", () => _app.SetMode("taskbar")));
         menu.Items.Add(Item("浮动模式", cfg.Mode == "floating", () => _app.SetMode("floating")));
         menu.Items.Add(Item("锁定位置（鼠标穿透）", cfg.Locked, () => _app.SetLocked(!cfg.Locked)));
+        menu.Items.Add(Item("自动避让任务栏元素", cfg.AutoPosition, _app.ToggleAutoPosition));
         menu.Items.Add(new Separator());
         menu.Items.Add(Item("打开设置…", false, _app.OpenSettings));
         menu.Items.Add(new Separator());

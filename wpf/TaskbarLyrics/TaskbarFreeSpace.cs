@@ -13,9 +13,11 @@ public static class TaskbarFreeSpace
     private static List<(int L, int R)> _cacheOcc = new();
 
     /// <summary>在任务栏上找最合适的空档（client 像素坐标）。
-    /// wantWidth：窗口期望宽度；currentX：窗口当前 x（用于就近选择，位置能不动就不动）。
+    /// wantWidth：窗口期望宽度（自然宽度，非收缩后）；currentX：窗口当前 x；
+    /// preferSide：left | right，放得下的空档里优先选指定半边（空间恢复时自动"回家"）。
     /// 找不到（UIA 失败/无占用信息）返回 null，调用方回退默认摆放。</summary>
-    public static (int L, int R)? FindBestGap(IntPtr trayHwnd, IntPtr excludeHwnd, int wantWidth, int currentX)
+    public static (int L, int R)? FindBestGap(IntPtr trayHwnd, IntPtr excludeHwnd,
+        int wantWidth, int currentX, string preferSide)
     {
         if (!NativeMethods.GetClientRect(trayHwnd, out var rc) || rc.Right <= 0) return null;
         var occ = OccupiedIntervals(trayHwnd, excludeHwnd);
@@ -30,24 +32,29 @@ public static class TaskbarFreeSpace
         }
         if (rc.Right > cur) gaps.Add((cur, rc.Right));
 
-        var center = currentX + wantWidth / 2.0;
-        // 放得下的空档里选离当前位置最近的
-        (int L, int R)? best = null;
-        var bestDist = double.MaxValue;
-        foreach (var g in gaps)
+        var half = rc.Right / 2.0;
+        var halfCenter = preferSide == "left" ? rc.Right / 4.0 : rc.Right * 3.0 / 4.0;
+        bool InSide((int L, int R) g) =>
+            preferSide == "left" ? (g.L + g.R) / 2.0 < half : (g.L + g.R) / 2.0 >= half;
+
+        // 放得下的空档：优先指定半边（取离该半边中心最近的），都没有再全局就近
+        var fitting = gaps.Where(g => g.R - g.L >= wantWidth).ToList();
+        var inSide = fitting.Where(InSide).ToList();
+        if (inSide.Count > 0)
+            return inSide.OrderBy(g => Math.Abs((g.L + g.R) / 2.0 - halfCenter)).First();
+        if (fitting.Count > 0)
         {
-            if (g.R - g.L < wantWidth) continue;
-            var dist = Math.Abs((g.L + g.R) / 2.0 - center);
-            if (dist < bestDist) { bestDist = dist; best = g; }
+            var center = currentX + wantWidth / 2.0;
+            return fitting.OrderBy(g => Math.Abs((g.L + g.R) / 2.0 - center)).First();
         }
-        // 没有放得下的：选最宽的空档（宽度至少 60px，调用方负责收缩窗口）
-        if (best == null)
+        // 没有放得下的：优先指定半边里最宽的，其次全局最宽（调用方负责收缩窗口）
+        var pool = gaps.Where(InSide).ToList();
+        if (pool.Count == 0) pool = gaps;
+        (int L, int R)? best = null;
+        var bestW = 60;
+        foreach (var g in pool)
         {
-            var bestW = 60;
-            foreach (var g in gaps)
-            {
-                if (g.R - g.L > bestW) { bestW = g.R - g.L; best = g; }
-            }
+            if (g.R - g.L > bestW) { bestW = g.R - g.L; best = g; }
         }
         return best;
     }

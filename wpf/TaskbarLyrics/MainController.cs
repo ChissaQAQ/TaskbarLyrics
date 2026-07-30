@@ -334,6 +334,14 @@ public sealed class MainController : IDisposable
         _overlay?.SetLocked(locked); // --settings 模式下无覆盖层
     }
 
+    /// <summary>右键菜单切换自动避让任务栏元素。</summary>
+    public void ToggleAutoPosition()
+    {
+        Cfg.AutoPosition = !Cfg.AutoPosition;
+        SaveCfg();
+        ApplySettings(refetchLyrics: false);
+    }
+
     public void SetAutostart(bool enabled)
     {
         try { Autostart.SetEnabled(enabled); }

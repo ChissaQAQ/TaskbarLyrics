@@ -45,7 +45,7 @@
                 Margin="1" Visibility="Collapsed"/>
         <!-- 悬停遮罩：淡白圆角底（对标 Win11 任务栏图标悬停），
              Margin 内缩，范围略小于任务栏高度，平时透明 -->
-        <Border x:Name="HoverMask" Background="#26FFFFFF" CornerRadius="6"
+        <Border x:Name="HoverMask" Background="#17FFFFFF" CornerRadius="6"
                 Margin="2,4" Opacity="0" IsHitTestVisible="False"
                 HorizontalAlignment="Left"/>
         <!-- 封面区：占位底（无封面时显示音符占位）+ 封面图（有封面时盖住占位） -->

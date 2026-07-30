@@ -62,6 +62,7 @@ public partial class SettingsWindow : Window
 
         HideFullscreenSwitch.IsChecked = cfg.HideOnFullscreen;
         AutoPositionSwitch.IsChecked = cfg.AutoPosition;
+        AutoSideCombo.SelectedIndex = cfg.AutoSide == "left" ? 1 : 0;
         LockedSwitch.IsChecked = cfg.Locked;
         AutostartSwitch.IsChecked = Autostart.IsEnabled();
 
@@ -140,6 +141,7 @@ public partial class SettingsWindow : Window
         if (MonitorCombo.SelectedIndex >= 0) cfg.Monitor = MonitorCombo.SelectedIndex;
         cfg.HideOnFullscreen = HideFullscreenSwitch.IsChecked == true;
         cfg.AutoPosition = AutoPositionSwitch.IsChecked == true;
+        cfg.AutoSide = AutoSideCombo.SelectedIndex == 1 ? "left" : "right";
         cfg.SecondLine = secondLine;
         cfg.Karaoke = karaoke;
         cfg.OffsetMs = Math.Clamp((int)(offsetS * 1000), -3000, 3000);

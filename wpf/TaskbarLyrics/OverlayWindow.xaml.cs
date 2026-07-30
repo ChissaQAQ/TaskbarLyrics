@@ -584,7 +584,7 @@ public partial class OverlayWindow : Window
             {
                 var dpi = DpiScaleX();
                 _autoGap = TaskbarFreeSpace.FindBestGap(
-                    trayHwnd, _hwnd, (int)Math.Round(targetWidth * dpi), CurrentTrayX(trayHwnd));
+                    trayHwnd, _hwnd, (int)Math.Round(targetWidth * dpi), CurrentTrayX(trayHwnd), Cfg.AutoSide);
                 if (_autoGap.HasValue)
                 {
                     var gapDip = (_autoGap.Value.R - _autoGap.Value.L) / dpi;
@@ -643,11 +643,17 @@ public partial class OverlayWindow : Window
 
             int x;
             var coverZonePx = (int)Math.Round(_lastCoverZoneDip * DpiScaleX());
+            var buttonsZonePx = _showingButtons ? (int)Math.Round(ButtonsWidth * DpiScaleX()) : 0;
             if (_autoGap.HasValue)
             {
-                // 自动避让：当前位置在空档内且不越界就不动，越界才夹回空档
+                // 自动避让确定性锚点：位置只由当前空档决定——空间收窄被挤走、
+                // 恢复时自动回来（实测：「保持当前位置」会被挤走后永远留在原地）。
+                // 左对齐钉空档左缘（文字左缘逐行不动）；
+                // 居中对齐让文字（而非含封面的整窗）钉在空档中心
                 var g = _autoGap.Value;
-                x = Math.Clamp(CurrentTrayX(tray), g.L, Math.Max(g.L, g.R - widthPx));
+                x = IsLeftAlign
+                    ? g.L
+                    : (g.L + g.R - widthPx - coverZonePx - buttonsZonePx) / 2;
             }
             else if (Cfg.Position == "custom" && (Cfg.XOffset.HasValue || Cfg.XCenter.HasValue))
             {
