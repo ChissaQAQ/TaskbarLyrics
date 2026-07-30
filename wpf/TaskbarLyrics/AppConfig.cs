@@ -12,6 +12,7 @@ public sealed class AppConfig
     // 外观
     [JsonPropertyName("font_family")] public string FontFamily { get; set; } = "Microsoft YaHei UI";
     [JsonPropertyName("font_size")] public int FontSize { get; set; } = 13;            // 原文字号
+    [JsonPropertyName("font_bold")] public bool FontBold { get; set; } = true;         // 原文半粗（任务栏上更清晰，译文保持常规）
     [JsonPropertyName("text_color")] public string TextColor { get; set; } = "#FFFFFF";
     [JsonPropertyName("trans_color")] public string TransColor { get; set; } = "#C8C8C8";
     [JsonPropertyName("highlight_color")] public string? HighlightColor { get; set; }  // 预留，None = 跟随系统强调色

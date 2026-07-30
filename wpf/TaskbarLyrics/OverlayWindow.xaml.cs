@@ -19,7 +19,7 @@ namespace TaskbarLyrics;
 
 public partial class OverlayWindow : Window
 {
-    private static readonly TimeSpan AnimLine = TimeSpan.FromMilliseconds(280); // 切行动画
+    private static readonly TimeSpan AnimLine = TimeSpan.FromMilliseconds(320); // 切行动画
     private static readonly TimeSpan AnimFade = TimeSpan.FromMilliseconds(150); // 按钮/遮罩浮现淡出
     private const double ButtonsWidth = 96;                                     // 悬停按钮区占位宽度
     private const double AnimWidthSec = 0.22;                                   // 悬停宽度过渡时长
@@ -171,8 +171,14 @@ public partial class OverlayWindow : Window
             if (conveyor)
             {
                 // 传送带切行（第二行是下一句）：旧块整体上移一个行距（不淡出），
-                // 新块同速从下方进入——旧下行与新上行是同一句，看起来就是它补位上去
-                var pitch = ((FrameworkElement)((StackPanel)oldLine).Children[0]).ActualHeight;
+                // 新块同速从下方进入——旧下行与新上行是同一句，看起来就是它补位上去。
+                // 行距必须取第二行的实际偏移（含两行间距）：只算第一行高度会差 3px，
+                // 旧下行和新上行永远错开，动画全程重影、结尾还跳一下（「残留」的根因）
+                var osp2 = (StackPanel)oldLine;
+                var pitch = ((FrameworkElement)osp2.Children[1])
+                    .TransformToAncestor(osp2).Transform(new Point(0, 0)).Y;
+                if (pitch < 4) // 兜底：测量失败退回第一行高度
+                    pitch = ((FrameworkElement)osp2.Children[0]).ActualHeight;
                 oldLine.RenderTransform = new TranslateTransform();
                 visual.RenderTransform = new TranslateTransform(0, pitch);
                 LinesHost.Children.Add(visual);
@@ -249,6 +255,7 @@ public partial class OverlayWindow : Window
         TitleText.Text = title;
         TitleText.FontFamily = family;
         TitleText.FontSize = OrigFontDip;
+        TitleText.FontWeight = Cfg.FontBold ? FontWeights.SemiBold : FontWeights.Normal; // 与歌词原文一致
         TitleText.LineHeight = Math.Ceiling(OrigFontDip * 1.3); // 与歌词行同规则固定行高
         TitleText.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
         TitleText.Foreground = new SolidColorBrush(ParseColor(Cfg.TextColor, Colors.White));
@@ -365,9 +372,10 @@ public partial class OverlayWindow : Window
         var pending = Freeze(new SolidColorBrush(Color.FromArgb(140, textColor.R, textColor.G, textColor.B)));
 
         var align = IsLeftAlign ? HorizontalAlignment.Left : HorizontalAlignment.Center;
+        var weight = Cfg.FontBold ? FontWeights.SemiBold : FontWeights.Normal; // 原文半粗更清晰，译文保持常规
         var karaoke = new KaraokeText();
         karaoke.SetLine(original, words, new FontFamily(Cfg.FontFamily), OrigFontDip, bright, pending,
-            Cfg.Shadow, align);
+            Cfg.Shadow, align, weight);
 
         var sp = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
         sp.Children.Add(karaoke);

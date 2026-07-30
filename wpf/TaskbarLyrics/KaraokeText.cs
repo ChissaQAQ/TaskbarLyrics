@@ -80,7 +80,8 @@ public sealed class KaraokeText : Grid
 
     /// <summary>设置一行歌词。words 为 null 时整行常亮（无逐字数据）。</summary>
     public void SetLine(string text, IReadOnlyList<KaraokeWord>? words, FontFamily family, double fontSizeDip,
-        Brush bright, Brush pending, bool shadow, HorizontalAlignment align = HorizontalAlignment.Center)
+        Brush bright, Brush pending, bool shadow, HorizontalAlignment align = HorizontalAlignment.Center,
+        FontWeight? weight = null)
     {
         _text = text;
         _words = words;
@@ -90,6 +91,8 @@ public sealed class KaraokeText : Grid
         _accent.Text = text;
         _pending.FontFamily = family;
         _accent.FontFamily = family;
+        _pending.FontWeight = weight ?? FontWeights.Normal;
+        _accent.FontWeight = weight ?? FontWeights.Normal;
         _pending.Foreground = pending;
         _accent.Foreground = bright;
         _pending.HorizontalAlignment = align;

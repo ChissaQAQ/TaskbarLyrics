@@ -537,6 +537,18 @@
                                         <ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                                        <TextBlock Style="{StaticResource RowTitle}" Text="加粗原文"/>
+                                        <TextBlock Style="{StaticResource RowDesc}" Text="歌词第一行（原文）使用半粗体，任务栏上更清晰；译文保持常规"/>
+                                    </StackPanel>
+                                    <ToggleButton x:Name="FontBoldSwitch" Grid.Column="1" Style="{StaticResource Switch}"
+                                                  VerticalAlignment="Center"/>
+                                </Grid>
+                                <Border Style="{StaticResource RowSeparator}"/>
+                                <Grid Style="{StaticResource Row}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
                                         <TextBlock Style="{StaticResource RowTitle}" Text="文字对齐"/>
                                         <TextBlock Style="{StaticResource RowDesc}" Text="居中时以文字中心为锚，行宽变化不漂移"/>
                                     </StackPanel>

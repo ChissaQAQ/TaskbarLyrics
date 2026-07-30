@@ -77,6 +77,7 @@ public partial class SettingsWindow : Window
             FontCombo.Items.Add(f.Source);
         FontCombo.Text = cfg.FontFamily;
         FontSizeBox.Text = cfg.FontSize.ToString();
+        FontBoldSwitch.IsChecked = cfg.FontBold;
         AlignCombo.SelectedIndex = cfg.TextAlign == "left" ? 1 : 0;
         WidthCombo.Text = cfg.Width.ToString();
         TextColorBox.Text = cfg.TextColor;
@@ -149,6 +150,7 @@ public partial class SettingsWindow : Window
         var family = FontCombo.Text.Trim();
         if (family.Length > 0) cfg.FontFamily = family;
         cfg.FontSize = fontSize;
+        cfg.FontBold = FontBoldSwitch.IsChecked == true;
         cfg.Width = width;
         cfg.TextAlign = AlignCombo.SelectedIndex == 1 ? "left" : "center";
         cfg.TextColor = TextColorBox.Text.Trim();
