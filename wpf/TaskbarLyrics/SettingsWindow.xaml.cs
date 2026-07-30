@@ -113,9 +113,9 @@ public partial class SettingsWindow : Window
             MessageBox.Show("字号需为 8~24 的整数", "任务栏歌词", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
         }
-        if (!int.TryParse(WidthCombo.Text, out var width) || width < 200 || width > 2000)
+        if (!int.TryParse(WidthCombo.Text, out var width) || width < 100 || width > 2000)
         {
-            MessageBox.Show("最大宽度需为 200~2000 的整数", "任务栏歌词", MessageBoxButton.OK, MessageBoxImage.Warning);
+            MessageBox.Show("最大宽度需为 100~2000 的整数", "任务栏歌词", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
         }
         if (!double.TryParse(OffsetBox.Text, out var offsetS) || offsetS < -3 || offsetS > 3)

@@ -106,7 +106,7 @@
                                               TextElement.Foreground="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}"/>
                             <TextBox x:Name="PART_EditableTextBox" Style="{x:Null}"
                                      Background="Transparent" BorderThickness="0"
-                                     Padding="11,0,30,0" VerticalContentAlignment="Center"
+                                     Margin="0,0,30,0" Padding="11,0,0,0" VerticalContentAlignment="Center"
                                      HorizontalAlignment="Stretch" Visibility="Collapsed"
                                      Foreground="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}"
                                      CaretBrush="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}"/>
@@ -604,6 +604,8 @@
                                     </StackPanel>
                                     <ComboBox x:Name="WidthCombo" Grid.Column="1" Width="96" HorizontalAlignment="Right"
                                               VerticalAlignment="Center" IsEditable="True">
+                                        <ComboBoxItem Content="200"/>
+                                        <ComboBoxItem Content="280"/>
                                         <ComboBoxItem Content="420"/>
                                         <ComboBoxItem Content="560"/>
                                         <ComboBoxItem Content="700"/>

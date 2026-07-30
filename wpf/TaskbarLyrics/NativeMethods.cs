@@ -100,6 +100,21 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
 
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AllowSetForegroundWindow(int dwProcessId);
+
+    /// <summary>允许本进程随时把窗口提到前台（托盘右键菜单的属主窗口需要激活，
+    /// 否则 WPF 菜单会因「失焦」在鼠标移上去之前自己关闭）。</summary>
+    public static void AllowSetForegroundAny() => AllowSetForegroundWindow(-1); // ASFW_ANY
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int nIndex);
+
+    /// <summary>虚拟屏幕矩形（物理像素，含所有显示器）。</summary>
+    public static (int X, int Y, int W, int H) VirtualScreenRect()
+        => (GetSystemMetrics(76), GetSystemMetrics(77), GetSystemMetrics(78), GetSystemMetrics(79));
+
     // ---- DWM ----
 
     [DllImport("dwmapi.dll")]

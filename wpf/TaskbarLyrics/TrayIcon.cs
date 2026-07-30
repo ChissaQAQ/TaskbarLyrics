@@ -73,22 +73,25 @@ public sealed class TrayIcon : IDisposable
         var menu = BuildMenu();
         // 独立弹出的 WPF ContextMenu 需要一个能获得焦点的属主窗口：
         // 本程序所有窗口都是不激活的，直接 IsOpen 会立即失焦关闭。
-        // 用一个 0x0 隐形可激活窗口做属主，菜单关闭时一并销毁。
+        // 用一个 1x1 隐形可激活窗口做属主（0x0 窗口激活不可靠，菜单会自关），
+        // 启动时已调 AllowSetForegroundWindow(ASFW_ANY) 保证 Activate 成功，
+        // 菜单关闭时属主一并销毁。
         var owner = new Window
         {
-            Width = 0,
-            Height = 0,
+            Width = 1,
+            Height = 1,
             WindowStyle = WindowStyle.None,
             ShowInTaskbar = false,
             ShowActivated = true,
             Topmost = true,
             AllowsTransparency = true,
             Background = System.Windows.Media.Brushes.Transparent,
-            Left = -32000, // 0 尺寸不可见，停哪都行，放屏幕外保险
+            Left = -32000, // 1x1 透明点不可见，停哪都行，放屏幕外保险
             Top = -32000,
         };
         owner.ContextMenu = menu;
         owner.Show();
+        owner.Activate(); // 属主必须真正激活，否则菜单在鼠标移上去前就自关
         menu.Placement = PlacementMode.MousePoint; // 跟随光标，WPF 自行处理多屏 DPI
         menu.PlacementTarget = owner;
         menu.IsOpen = true;

@@ -50,9 +50,12 @@ public partial class OverlayWindow : Window
     private bool CenterAnchored => Cfg.TextAlign != "left";
     private double _lastCoverZoneDip;     // Dock 时记录的封面区宽度（中心补偿用）
 
-    // 悬停复查：窗口尺寸/位置变化会让 MouseLeave 误触发，按光标是否仍在窗口矩形内判定
-    private readonly System.Windows.Threading.DispatcherTimer _hoverRecheck =
-        new() { Interval = TimeSpan.FromMilliseconds(150) };
+    // 悬停判定：100ms 轮询光标是否在窗口矩形内。
+    // 不用 MouseEnter/Leave 事件——透明分层窗里移到无内容区域会误触发 Leave，
+    // 悬停引起的窗口尺寸变化又会触发假 Enter，事件抖动在浮动模式下形成来回闪烁；
+    // 轮询下悬停态只由光标几何位置决定，不可能来回跳变
+    private readonly System.Windows.Threading.DispatcherTimer _hoverPoll =
+        new() { Interval = TimeSpan.FromMilliseconds(100) };
 
     private double _displayWidthDip = 120; // 当前实际窗口宽
     private int _lastHeightDip = 48;
@@ -93,13 +96,33 @@ public partial class OverlayWindow : Window
             if (_winEventHook != IntPtr.Zero)
                 NativeMethods.UnhookWinEvent(_winEventHook);
         };
-        MouseEnter += (_, _) => { _hover = true; UpdateDisplayMode(); };
-        MouseLeave += (_, _) => RecheckHover();
-        _hoverRecheck.Tick += (_, _) => RecheckHover();
         MouseLeftButtonDown += OnLeftDown;
         MouseMove += OnMouseMove;
         MouseLeftButtonUp += OnLeftUp;
         MouseRightButtonUp += (_, _) => { if (!Cfg.Locked) _app.ShowContextMenu(); };
+        _hoverPoll.Tick += (_, _) => PollHover();
+        _hoverPoll.Start();
+    }
+
+    /// <summary>悬停轮询：光标在窗口矩形内即视为悬停（窗口整体检测）。
+    /// 锁定（鼠标穿透）或窗口隐藏时不存在悬停。</summary>
+    private void PollHover()
+    {
+        if (_hwnd == IntPtr.Zero) return;
+        var inside = false;
+        if (!Cfg.Locked
+            && (NativeMethods.GetWindowLongPtr(_hwnd, NativeMethods.GWL_STYLE)
+                & NativeMethods.WS_VISIBLE) != 0)
+        {
+            NativeMethods.GetCursorPos(out var pt);
+            NativeMethods.GetWindowRect(_hwnd, out var rc);
+            inside = pt.X >= rc.Left && pt.X <= rc.Right && pt.Y >= rc.Top && pt.Y <= rc.Bottom;
+        }
+        if (inside != _hover)
+        {
+            _hover = inside;
+            UpdateDisplayMode();
+        }
     }
 
     private double DpiScaleX() => VisualTreeHelper.GetDpi(this).DpiScaleX;
@@ -307,29 +330,6 @@ public partial class OverlayWindow : Window
         if (snapDockOnComplete)
             anim.Completed += (_, _) => Dock();
         ButtonsHost.BeginAnimation(WidthProperty, anim);
-    }
-
-    /// <summary>悬停判定：以光标是否仍在窗口矩形内为准（窗口整体检测，
-    /// 尺寸/位置变化造成的 MouseLeave 不误判为移出）。</summary>
-    private void RecheckHover()
-    {
-        if (_hwnd == IntPtr.Zero)
-        {
-            _hoverRecheck.Stop();
-            _hover = false;
-            UpdateDisplayMode();
-            return;
-        }
-        NativeMethods.GetCursorPos(out var pt);
-        NativeMethods.GetWindowRect(_hwnd, out var rc);
-        if (pt.X >= rc.Left - 2 && pt.X <= rc.Right + 2 && pt.Y >= rc.Top - 2 && pt.Y <= rc.Bottom + 2)
-        {
-            _hoverRecheck.Start(); // 仍在窗口内：周期复查直到真正移出
-            return;
-        }
-        _hoverRecheck.Stop();
-        _hover = false;
-        UpdateDisplayMode();
     }
 
     private static void FadeTo(UIElement el, double target)
@@ -665,6 +665,10 @@ public partial class OverlayWindow : Window
                 x = (rect.Left + rect.Right - widthPx) / 2;
                 y = rect.Bottom - heightPx - 80;
             }
+            // 防拖丢：窗口至少保留 48px 在虚拟屏幕内（拖出屏幕外就找不回来了）
+            var (vx, vy, vw, vh) = NativeMethods.VirtualScreenRect();
+            x = Math.Clamp(x, vx - widthPx + 48, vx + vw - 48);
+            y = Math.Clamp(y, vy, vy + vh - 48);
             NativeMethods.SetWindowPos(_hwnd, IntPtr.Zero, x, y, widthPx, heightPx,
                 NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOZORDER | NativeMethods.SWP_FRAMECHANGED);
         }
