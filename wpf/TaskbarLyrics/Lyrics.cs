@@ -33,8 +33,10 @@ public static partial class Lyrics
     [GeneratedRegex(@"\[offset:(-?\d+)\]")]
     private static partial Regex KrcOffsetRegex();
 
-    // 制作信息行（作词/编曲/制作人等），不应作为歌词显示
-    [GeneratedRegex(@"^\s*(?:作词|作曲|编曲|制作人|监制|混音|混音师|录音|录音师|和声|和声编写|吉他|贝斯|鼓|键盘|弦乐|弦乐编写|企划|统筹|发行|出品|封面|设计|OP|SP|lyrics?|composed?|arranged?|music|producer|lyricist|songwriter)\b.*[:：]",
+    // 制作信息行（作词/编曲/制作人等），不应作为歌词显示。
+    // 注意 QQ 源是缩写格式（词：/曲：/合声：/录音工程：），所以中文词后不要求 \b
+    // （"录音"后紧跟"工程"没有词边界），靠行首词+冒号组合约束防误伤正常歌词
+    [GeneratedRegex(@"^\s*(?:作词|作曲|编曲|制作人|监制|混音|录音|和声|合声|吉他|贝斯|鼓|键盘|弦乐|企划|统筹|发行|出品|封面|设计|词|曲|演唱|演奏|OP|SP|lyrics?|composed?|arranged?|music|producer|lyricist|songwriter|vocals?|guitar|bass|drums?|mixed|mastering|recording).*[:：]",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex CreditLineRegex();
 
@@ -145,19 +147,25 @@ public static partial class Lyrics
             return false;
         }
         var all = songs.EnumerateArray().ToList();
-        var exact = all.Where(s => ArtistMatch(s, artist)).ToList();
-        // 歌手完全匹配不上时退到标题精确匹配
-        if (exact.Count == 0)
-            exact = all.Where(s => s.TryGetProperty("name", out var n)
-                && string.Equals(n.GetString(), title, StringComparison.OrdinalIgnoreCase)).ToList();
-        if (exact.Count == 0) return null;
-        // 候选按时长接近度排序，逐个尝试：同一首歌常有多个版本，
+        // 歌名必须匹配（必要条件），歌手匹配与时长接近只是排序权重——
+        // 只按歌手+时长挑会把同歌手、时长接近的别的歌抓来（主人反馈偶尔匹配错歌）
+        var ordered = all
+            .Select(s => (Song: s,
+                          Ts: TitleScore(s.TryGetProperty("name", out var nv) ? nv.GetString() ?? "" : "", title),
+                          Artist: ArtistMatch(s, artist),
+                          DurDiff: durationS > 0 && s.TryGetProperty("duration", out var dv)
+                              ? Math.Abs(dv.GetDouble() / 1000 - durationS) : 0.0))
+            .Where(x => x.Ts > 0)
+            // 时长差太多基本是另一版本/另一首歌（现场版、remix 宁缺毋滥）
+            .Where(x => durationS <= 0 || x.DurDiff <= 20)
+            .OrderByDescending(x => x.Ts)
+            .ThenByDescending(x => x.Artist)
+            .ThenBy(x => x.DurDiff)
+            .Select(x => x.Song)
+            .ToList();
+        // 候选逐个尝试：同一首歌常有多个版本，
         // 有的版本没译文（主人反馈网易云明显有译文却显示不出来），优先带译文的版本
-        var ordered = exact.OrderBy(s =>
-        {
-            var dur = s.TryGetProperty("duration", out var d) ? d.GetDouble() / 1000 : 0;
-            return durationS > 0 ? Math.Abs(dur - durationS) : 0;
-        }).ToList();
+        if (ordered.Count == 0) return null;
         List<LyricLine>? firstResult = null;
         foreach (var cand in ordered.Take(3))
         {
@@ -177,6 +185,8 @@ public static partial class Lyrics
                 var root = lyric.RootElement;
                 var lines = ParseLrc(GetLyricText(root, "lrc"));
                 if (lines.Count == 0) continue;
+                // 歌词总长远超歌曲时长 → 多半是抓错了歌（同名歌/不同版本），换下一个候选
+                if (durationS > 0 && lines[^1].Ms / 1000.0 > durationS + 30) continue;
                 // 第二行：译文（tlyric）或罗马音（romalrc）
                 var trans = secondLine switch
                 {
@@ -224,18 +234,22 @@ public static partial class Lyrics
                 : "";
 
         var songs = list.EnumerateArray().ToList();
-        // 优先：歌手匹配且时长接近；其次：歌手匹配；兜底：第一条
-        var chosen = songs[0];
-        var artistOk = songs.Where(s => artist.Length > 0 && SingerNames(s).Contains(artist)).ToList();
-        if (artistOk.Count > 0)
-        {
-            chosen = artistOk[0];
-            foreach (var s in artistOk)
-            {
-                var interval = s.TryGetProperty("interval", out var iv) ? iv.GetDouble() : 0;
-                if (durationS > 0 && Math.Abs(interval - durationS) < 3) { chosen = s; break; }
-            }
-        }
+        // 与网易云同一套标准：歌名必须匹配，歌手/时长只是排序权重（防兜底拿到同歌手别的歌）
+        static double IntervalOf(JsonElement s) =>
+            s.TryGetProperty("interval", out var iv) ? iv.GetDouble() : 0;
+        var ordered = songs
+            .Select(s => (Song: s,
+                          Ts: TitleScore(s.TryGetProperty("songname", out var nv) ? nv.GetString() ?? "" : "", title),
+                          Artist: artist.Length > 0 && SingerNames(s).Contains(artist),
+                          DurDiff: durationS > 0 ? Math.Abs(IntervalOf(s) - durationS) : 0.0))
+            .Where(x => x.Ts > 0)
+            .Where(x => durationS <= 0 || x.DurDiff <= 20)
+            .OrderByDescending(x => x.Ts)
+            .ThenByDescending(x => x.Artist)
+            .ThenBy(x => x.DurDiff)
+            .ToList();
+        if (ordered.Count == 0) return null;
+        var chosen = ordered[0].Song;
 
         var text = await GetStringAsync(
             "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?" + Q(new()
@@ -249,6 +263,8 @@ public static partial class Lyrics
         using var lyric = JsonDocument.Parse(text);
         var lines = ParseLrc(lyric.RootElement.TryGetProperty("lyric", out var l) ? l.GetString() ?? "" : "");
         if (lines.Count == 0) return null;
+        // 歌词总长远超歌曲时长 → 抓错歌嫌疑，放弃本源交给 LRCLIB 兜底
+        if (durationS > 0 && lines[^1].Ms / 1000.0 > durationS + 30) return null;
         var trans = ParseLrc(lyric.RootElement.TryGetProperty("trans", out var t) ? t.GetString() ?? "" : "");
         return MergeTranslation(lines, trans);
     }
@@ -331,24 +347,29 @@ public static partial class Lyrics
             || info.ValueKind != JsonValueKind.Array || info.GetArrayLength() == 0)
             return null;
         var songs = info.EnumerateArray().ToList();
-        // 优先：歌手匹配且时长接近
-        var chosen = songs[0];
-        var artistOk = songs.Where(s =>
+        // 与主歌词源同一套标准：歌名必须匹配（必要条件），歌手/时长只是排序权重。
+        // 逐字数据挂错歌会让扫过时间完全错乱，比没有逐字更糟
+        static bool KgArtistMatch(JsonElement s, string artist)
         {
             var sn = s.TryGetProperty("singername", out var n) ? n.GetString() ?? "" : "";
-            return artist.Length > 0 && (artist.Contains(sn) || sn.Contains(artist)) && sn.Length > 0;
-        }).ToList();
-        // 注意 Python 的条件是 artist in singername or singername in artist，
-        // singername 为空时 "" in artist 恒真会误匹配，这里要求 sn 非空（实际 API 行为为准）
-        if (artistOk.Count > 0)
-        {
-            chosen = artistOk[0];
-            foreach (var s in artistOk)
-            {
-                var dur = s.TryGetProperty("duration", out var d) ? d.GetDouble() : 0;
-                if (durationS > 0 && Math.Abs(dur - durationS) < 3) { chosen = s; break; }
-            }
+            // singername 为空时不能放行（空串是任何串的子串，恒真会误匹配）
+            return artist.Length > 0 && sn.Length > 0
+                && (artist.Contains(sn) || sn.Contains(artist));
         }
+        var ordered = songs
+            .Select(s => (Song: s,
+                          Ts: TitleScore(s.TryGetProperty("songname", out var nv) ? nv.GetString() ?? "" : "", title),
+                          Artist: KgArtistMatch(s, artist),
+                          DurDiff: durationS > 0 && s.TryGetProperty("duration", out var dv)
+                              ? Math.Abs(dv.GetDouble() - durationS) : 0.0))
+            .Where(x => x.Ts > 0)
+            .Where(x => durationS <= 0 || x.DurDiff <= 20)
+            .OrderByDescending(x => x.Ts)
+            .ThenByDescending(x => x.Artist)
+            .ThenBy(x => x.DurDiff)
+            .ToList();
+        if (ordered.Count == 0) return null;
+        var chosen = ordered[0].Song;
 
         var songname = chosen.TryGetProperty("songname", out var snv) ? snv.GetString() ?? title : title;
         var chosenDur = chosen.TryGetProperty("duration", out var cd) ? cd.GetDouble() : durationS;
@@ -375,6 +396,18 @@ public static partial class Lyrics
             }));
         var content = download.RootElement.TryGetProperty("content", out var c) ? c.GetString() ?? "" : "";
         return ParseKrc(DecodeKrc(content));
+    }
+
+    /// <summary>歌名匹配度：0=不匹配，1=归一化后一方包含另一方（覆盖 "(Live)" 等后缀差异），
+    /// 2=归一化完全相等。歌名是防错配的第一道闸：只按歌手+时长挑候选，
+    /// 会把同歌手、时长接近的另一首歌的歌词抓来。</summary>
+    private static int TitleScore(string candidate, string title)
+    {
+        var a = NormalizeForMatch(candidate);
+        var b = NormalizeForMatch(title);
+        if (a.Length == 0 || b.Length == 0) return 0;
+        if (a == b) return 2;
+        return a.Contains(b) || b.Contains(a) ? 1 : 0;
     }
 
     /// <summary>匹配用归一化：全角转半角、小写化，只留字母和数字（忽略空白与标点差异）。</summary>
