@@ -22,7 +22,9 @@ public partial class OverlayWindow : Window
     private static readonly TimeSpan AnimLine = TimeSpan.FromMilliseconds(320); // 切行动画
     private static readonly TimeSpan AnimFade = TimeSpan.FromMilliseconds(150); // 按钮/遮罩浮现淡出
     private const double ButtonsWidth = 96;                                     // 悬停按钮区占位宽度
-    private const double AnimWidthSec = 0.22;                                   // 悬停宽度过渡时长
+    /// <summary>逐字进度允许的漂移（ms），超出才 Seek 校准（见 SyncProgress）。
+    /// 取 150ms：小于一个字的典型时长，听感上察觉不到，又足以吸收定时器抖动。</summary>
+    internal const double SeekToleranceMs = 150;
 
     private readonly MainController _app;
     private IntPtr _hwnd;
@@ -104,6 +106,8 @@ public partial class OverlayWindow : Window
         MouseMove += OnMouseMove;
         MouseLeftButtonUp += OnLeftUp;
         MouseRightButtonUp += (_, _) => { if (!Cfg.Locked) _app.ShowContextMenu(); };
+        // 内容区宽度变化（窗口宽随歌词长度/任务栏空档/悬停按钮列变化）即重算滚动距离
+        LinesHost.SizeChanged += (_, _) => ApplyViewportWidth();
         _hoverPoll.Tick += (_, _) => PollHover();
         _hoverPoll.Start();
     }
@@ -150,24 +154,26 @@ public partial class OverlayWindow : Window
         _translation = translation;
         SetHasContent(original.Length > 0);
 
-        // 切行先清掉上一行的译文滚动状态：新行无译文时，
-        // 残留状态会让跟随滚动逻辑在已移除的旧元素上空跑
-        _transTb = null;
-        _transOverflow = 0;
-        _lastTransScroll = 0;
+        // 切行先清掉上一行的第二行引用：新行无译文时，
+        // 残留引用会让跟随滚动逻辑在已移除的旧元素上空跑
+        _transLine = null;
 
         var oldLine = _currentLine;
         var oldSb = _karaokeStoryboard;
         _karaokeStoryboard = null;
 
-        var (visual, karaoke) = BuildLineVisual(original, translation, words);
+        var (visual, karaoke, trans) = BuildLineVisual(original, translation, words);
         _currentLine = visual;
         _karaoke = karaoke;
+        _transLine = trans;
+        // 新行建好就先按当前视口宽算一次溢出：等布局后的 SizeChanged 才算的话，
+        // 首帧会以「视口 0」渲染（当作不溢出、居中），随后跳成滚动布局
+        ApplyViewportWidth();
 
         if (animate && oldLine != null)
         {
             var conveyor = nextLineMode
-                           && oldLine is StackPanel osp && osp.Children.Count > 1
+                           && oldLine is Panel osp && osp.Children.Count > 1
                            && ((FrameworkElement)osp.Children[0]).ActualHeight > 4;
             if (conveyor)
             {
@@ -175,7 +181,7 @@ public partial class OverlayWindow : Window
                 // 新块同速从下方进入——旧下行与新上行是同一句，看起来就是它补位上去。
                 // 行距必须取第二行的实际偏移（含两行间距）：只算第一行高度会差 3px，
                 // 旧下行和新上行永远错开，动画全程重影、结尾还跳一下（「残留」的根因）
-                var osp2 = (StackPanel)oldLine;
+                var osp2 = (Panel)oldLine;
                 var pitch = ((FrameworkElement)osp2.Children[1])
                     .TransformToAncestor(osp2).Transform(new Point(0, 0)).Y;
                 if (pitch < 4) // 兜底：测量失败退回第一行高度
@@ -185,22 +191,22 @@ public partial class OverlayWindow : Window
                 LinesHost.Children.Add(visual);
 
                 var sb = new Storyboard();
-                AddAnim(sb, oldLine, new PropertyPath("(UIElement.RenderTransform).(TranslateTransform.Y)"), -pitch, easingIn: false);
-                AddAnim(sb, visual, new PropertyPath("(UIElement.RenderTransform).(TranslateTransform.Y)"), 0, easingIn: false);
+                AddAnim(sb, oldLine, new PropertyPath("(UIElement.RenderTransform).(TranslateTransform.Y)"), 0, -pitch);
+                AddAnim(sb, visual, new PropertyPath("(UIElement.RenderTransform).(TranslateTransform.Y)"), pitch, 0);
                 // 共享句 morph：旧「下一句」是小号灰字、新「当前句」是大号白字，
                 // 刚性平移会让两种渲染全程叠影（「残留」的根因）——
                 // 旧下行在滑行中淡出、新上行淡入，小灰字滑上去的同时变成大白字
                 var oldBottom = (FrameworkElement)osp2.Children[1];
-                AddAnim(sb, oldBottom, new PropertyPath("Opacity"), 0, easingIn: false);
-                if (visual is StackPanel nsp && nsp.Children.Count > 1)
+                AddAnim(sb, oldBottom, new PropertyPath("Opacity"), oldBottom.Opacity, 0);
+                if (visual is Panel nsp && nsp.Children.Count > 1)
                 {
                     var top = (FrameworkElement)nsp.Children[0];
                     top.Opacity = 0;
-                    AddAnim(sb, top, new PropertyPath("Opacity"), 1, easingIn: false);
+                    AddAnim(sb, top, new PropertyPath("Opacity"), 0, 1);
                     // 新的“下一句”淡入
                     var bottom = (FrameworkElement)nsp.Children[1];
                     bottom.Opacity = 0;
-                    AddAnim(sb, bottom, new PropertyPath("Opacity"), 1, easingIn: false);
+                    AddAnim(sb, bottom, new PropertyPath("Opacity"), 0, 1);
                 }
                 var oldRef = oldLine;
                 sb.Completed += (_, _) =>
@@ -220,10 +226,10 @@ public partial class OverlayWindow : Window
                 LinesHost.Children.Add(visual);
 
                 var sb = new Storyboard();
-                AddAnim(sb, oldLine, new PropertyPath("Opacity"), 0, easingIn: false);
-                AddAnim(sb, oldLine, new PropertyPath("(UIElement.RenderTransform).(TranslateTransform.Y)"), -dist, easingIn: false);
-                AddAnim(sb, visual, new PropertyPath("Opacity"), 1, easingIn: false);
-                AddAnim(sb, visual, new PropertyPath("(UIElement.RenderTransform).(TranslateTransform.Y)"), 0, easingIn: false);
+                AddAnim(sb, oldLine, new PropertyPath("Opacity"), oldLine.Opacity, 0);
+                AddAnim(sb, oldLine, new PropertyPath("(UIElement.RenderTransform).(TranslateTransform.Y)"), 0, -dist);
+                AddAnim(sb, visual, new PropertyPath("Opacity"), 0, 1);
+                AddAnim(sb, visual, new PropertyPath("(UIElement.RenderTransform).(TranslateTransform.Y)"), dist, 0);
                 var oldRef = oldLine;
                 sb.Completed += (_, _) =>
                 {
@@ -319,9 +325,9 @@ public partial class OverlayWindow : Window
             // 按钮轻微右滑入场
             var tt = new TranslateTransform(-6, 0);
             ButtonsPanel.RenderTransform = tt;
-            tt.BeginAnimation(TranslateTransform.XProperty, new DoubleAnimation(0, AnimFade)
+            tt.BeginAnimation(TranslateTransform.XProperty, new DoubleAnimation(-6, 0, AnimFade)
             {
-                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+                EasingFunction = EaseOut,
             });
         }
 
@@ -349,32 +355,37 @@ public partial class OverlayWindow : Window
     /// <summary>按钮列宽度展开/收拢动画（200ms 三次缓出）。</summary>
     private void AnimateButtonsHost(double to, bool snapDockOnComplete)
     {
-        var anim = new DoubleAnimation(to, TimeSpan.FromMilliseconds(200))
+        var anim = new DoubleAnimation(ButtonsHost.ActualWidth, to, TimeSpan.FromMilliseconds(200))
         {
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+            EasingFunction = EaseOut,
         };
         if (snapDockOnComplete)
             anim.Completed += (_, _) => Dock();
         ButtonsHost.BeginAnimation(WidthProperty, anim);
     }
 
-    private static void FadeTo(UIElement el, double target)
-        => el.BeginAnimation(OpacityProperty, new DoubleAnimation(target, AnimFade));
+    /// <summary>淡变/展开统一用三次缓出：线性淡变在起止处显得生硬。</summary>
+    private static readonly IEasingFunction EaseOut = new CubicEase { EasingMode = EasingMode.EaseOut };
 
-    private static void AddAnim(Storyboard sb, FrameworkElement target, PropertyPath path, double to, bool easingIn)
+    /// <summary>透明度淡变。必须显式给 From（取当前有效值）：
+    /// DoubleAnimation 只给 To 时起点取属性「基值」而非当前动画值——
+    /// 被上一轮动画改到 1 的 Opacity 其基值仍是 XAML 里的 0，
+    /// 再动画到 0 就成了 0→0，元素瞬间消失而不是淡出。</summary>
+    private static void FadeTo(UIElement el, double target)
+        => el.BeginAnimation(OpacityProperty,
+            new DoubleAnimation(el.Opacity, target, AnimFade) { EasingFunction = EaseOut });
+
+    /// <summary>加一条切行动画。From 同样必须显式给，理由见 FadeTo。</summary>
+    private static void AddAnim(Storyboard sb, FrameworkElement target, PropertyPath path,
+        double from, double to)
     {
-        var anim = new DoubleAnimation(to, AnimLine)
-        {
-            EasingFunction = easingIn
-                ? new QuadraticEase { EasingMode = EasingMode.EaseIn }
-                : new CubicEase { EasingMode = EasingMode.EaseOut },
-        };
+        var anim = new DoubleAnimation(from, to, AnimLine) { EasingFunction = EaseOut };
         Storyboard.SetTarget(anim, target);
         Storyboard.SetTargetProperty(anim, path);
         sb.Children.Add(anim);
     }
 
-    private (StackPanel Visual, KaraokeText Karaoke) BuildLineVisual(
+    private (NaturalMeasureStack Visual, KaraokeText Karaoke, TranslationText? Trans) BuildLineVisual(
         string original, string translation, IReadOnlyList<KaraokeWord>? words)
     {
         var textColor = ParseColor(Cfg.TextColor, Colors.White);
@@ -387,66 +398,32 @@ public partial class OverlayWindow : Window
         karaoke.SetLine(original, words, new FontFamily(Cfg.FontFamily), OrigFontDip, bright, pending,
             Cfg.Shadow, align, weight);
 
-        var sp = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+        var sp = new NaturalMeasureStack { VerticalAlignment = VerticalAlignment.Center };
         sp.Children.Add(karaoke);
+        TranslationText? trans = null;
         if (translation.Length > 0 && Cfg.SecondLine != "off")
         {
             var transBrush = Freeze(new SolidColorBrush(ParseColor(Cfg.TransColor, Color.FromRgb(0xC8, 0xC8, 0xC8))));
-            var transFamily = new FontFamily(Cfg.FontFamily);
-            var tb = new System.Windows.Controls.TextBlock
-            {
-                Text = translation,
-                Foreground = transBrush,
-                FontFamily = transFamily,
-                FontSize = TransFontDip,
-                HorizontalAlignment = align,
-                Margin = new Thickness(0, 3, 0, 0), // 与原文之间的行距
-                LineHeight = Math.Ceiling(TransFontDip * 1.3), // 与原文同规则固定行高，保留行间距
-                LineStackingStrategy = LineStackingStrategy.BlockLineHeight,
-            };
-            if (Cfg.Shadow) // 小字号用更轻的阴影，避免发虚
-                tb.Effect = new DropShadowEffect { Color = Colors.Black, BlurRadius = 3, ShadowDepth = 0, Opacity = 0.5 };
-            var hasWords = words != null;
-            tb.SizeChanged += (_, _) => UpdateTextScroll(tb, translation, transFamily, align, hasWords);
-            // 译文也用无限宽测量容器包一层（同 KaraokeText，否则超宽译文排版阶段就被截断）
-            var transHost = new NaturalMeasureGrid();
-            transHost.Children.Add(tb);
-            sp.Children.Add(transHost);
+            trans = new TranslationText { Margin = new Thickness(0, 3, 0, 0) }; // 与原文之间的行距
+            trans.SetText(translation, new FontFamily(Cfg.FontFamily), TransFontDip, transBrush,
+                Cfg.Shadow, align, followProgress: words != null);
+            sp.Children.Add(trans);
         }
-        return (sp, karaoke);
+        return (sp, karaoke, trans);
     }
 
-    // 当前译文行的滚动状态（供 SyncProgress 跟随原文进度同步滚动）
-    private System.Windows.Controls.TextBlock? _transTb;
-    private double _transOverflow;
-    private double _lastTransScroll;
+    // 当前第二行（供 SyncProgress 跟随原文进度同步滚动、视口变化时重算溢出）
+    private TranslationText? _transLine;
 
-    /// <summary>译文明显超宽时左对齐 + 横向滚动：有逐字数据时由 SyncProgress 跟随原文
-    /// 进度同步滚动，无逐字数据时往返走马灯兜底（不缩字号）。</summary>
-    private void UpdateTextScroll(System.Windows.Controls.TextBlock tb, string text, FontFamily family,
-        HorizontalAlignment align, bool hasWords)
+    /// <summary>把内容区可用宽度告知当前行：滚动逻辑要的是视口宽，
+    /// 不能由行自身的 ActualWidth 反推（溢出时自身被文本撑宽，会自激振荡）。
+    /// LinesHost 宽度只由窗口宽决定（star 列），不受行内容影响，是稳定的视口信号。</summary>
+    private void ApplyViewportWidth()
     {
-        var dpi = VisualTreeHelper.GetDpi(tb).PixelsPerDip;
-        var natural = KaraokeText.MeasureTextWidth(text, family, TransFontDip, dpi);
-        var avail = tb.ActualWidth - 4;
-        var overflow = natural - avail;
-        _transTb = tb;
-        if (overflow > 10 && avail > 0) // 阈值 10px：微小测量误差不触发，避免无故左右晃
-        {
-            _transOverflow = overflow;
-            tb.Width = natural; // 显式自然宽度，防止被容器裁剪导致滚动看不到尾部
-            tb.HorizontalAlignment = HorizontalAlignment.Left;
-            if (hasWords) Marquee.Clear(tb); // 跟随模式：由 SyncProgress 驱动
-            else Marquee.Apply(tb, overflow); // 无逐字：往返滚动兜底
-        }
-        else
-        {
-            _transOverflow = 0;
-            tb.Width = double.NaN;
-            tb.HorizontalAlignment = align;
-            Marquee.Clear(tb);
-            tb.RenderTransform = null;
-        }
+        var w = LinesHost.ActualWidth;
+        if (w <= 0) return;
+        _karaoke?.SetViewportWidth(w);
+        _transLine?.SetViewportWidth(w);
     }
 
     private static Color ParseColor(string hex, Color fallback)
@@ -475,37 +452,29 @@ public partial class OverlayWindow : Window
         SyncProgress(elapsedMs, playing);
     }
 
-    /// <summary>~50ms 周期调用：用 SMTC 本地插值进度 Seek 逐字动画（暂停时冻结）。</summary>
+    /// <summary>~50ms 周期调用：用 SMTC 本地插值进度校准逐字动画（暂停时冻结）。
+    ///
+    /// 只在偏差超过 SeekToleranceMs 时才 Seek。无条件每拍 Seek 会让逐字扫过和
+    /// 横向滚动以定时器频率（20Hz）来回被拽：Seek 在动画 tick 边界生效，
+    /// 而目标时间取自调用瞬间的真实时钟，两者永远差不到一帧但方向随机，
+    /// 于是位置每 50ms 抖一次——这就是长歌词滚动「一卡一卡」的主因。
+    /// 时钟本身走的也是真实时间，放手让它自己跑就是平滑的；
+    /// 只有真正漂移（用户拖进度条、换歌、暂停恢复、SMTC 基准刷新）才需要拉回。</summary>
     public void SyncProgress(double lineElapsedMs, bool playing)
     {
         if (_karaokeStoryboard == null) return;
         var t = TimeSpan.FromMilliseconds(Math.Clamp(lineElapsedMs, 0, _karaokeTotalMs));
-        _karaokeStoryboard.Seek(this, t, TimeSeekOrigin.BeginTime);
+        var cur = _karaokeStoryboard.GetCurrentTime(this);
+        if (cur == null || Math.Abs((t - cur.Value).TotalMilliseconds) > SeekToleranceMs)
+            _karaokeStoryboard.Seek(this, t, TimeSeekOrigin.BeginTime);
         if (playing != _sbPlaying)
         {
             _sbPlaying = playing;
             if (playing) _karaokeStoryboard.Resume(this);
             else _karaokeStoryboard.Pause(this);
         }
-        // 译文跟随原文逐字进度同步横向滚动（重定目标短动画，平滑跟随）
-        if (_transTb != null && _transOverflow > 10 && _karaoke != null)
-        {
-            var target = -_transOverflow * _karaoke.ScrollFraction;
-            if (Math.Abs(target - _lastTransScroll) > 0.5)
-            {
-                _lastTransScroll = target;
-                if (_transTb.RenderTransform is not TranslateTransform tt)
-                {
-                    tt = new TranslateTransform();
-                    _transTb.RenderTransform = tt;
-                }
-                tt.BeginAnimation(TranslateTransform.XProperty,
-                    new DoubleAnimation(target, TimeSpan.FromMilliseconds(120))
-                    {
-                        EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut },
-                    });
-            }
-        }
+        // 第二行跟随原文逐字进度同步横向滚动
+        if (_karaoke != null) _transLine?.ScrollToFraction(_karaoke.ScrollFraction);
     }
 
     /// <summary>更新播放/暂停按钮字形。</summary>

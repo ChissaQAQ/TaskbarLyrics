@@ -2,7 +2,7 @@
 // 上层用 Clip 矩形裁剪。PositionMs 依赖属性由 Storyboard 按逐字时间戳驱动，
 // OnPropertyChanged 时按「唱过的字全亮 + 正在唱的字按比例」重算 Clip 边界
 // （对应 Python render.py 的 _karaoke_boundary_x）。
-// 超长歌词不缩字号，由 Marquee 横向走马灯滚动（窗口宽度已达上限时）。
+// 超长歌词不缩字号，由横向滚动（有逐字数据时跟随进度，否则走马灯兜底）呈现。
 using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
@@ -36,6 +36,46 @@ public class NaturalMeasureGrid : Grid
     }
 }
 
+/// <summary>垂直堆叠容器，子元素按自然宽度测量并排列（原文/译文两行的宿主）。
+///
+/// 必须自己实现而不能用 StackPanel：StackPanel 按容器宽（视口）测量子元素，
+/// WPF 的 MeasureCore 会把超宽子元素的 DesiredSize 裁到容器宽并记为 clipped，
+/// 于是排列阶段给它补一个到「布局槽」的 layout clip——而 layout clip 在
+/// RenderTransform 之前生效：内容先被裁成视口宽，再整体左移，滚过头就整行移出视口
+/// （「滚到后半段整行不见了」的根因，用 LayoutInformation.GetLayoutClip 可直接看到）。
+/// 这里给子元素无限宽测量、按自然宽度排列，让它们不带 layout clip；
+/// 视口裁剪由外层 ClipToBounds 容器统一负责。</summary>
+public class NaturalMeasureStack : Panel
+{
+    protected override Size MeasureOverride(Size constraint)
+    {
+        var childConstraint = new Size(double.PositiveInfinity, constraint.Height);
+        var w = 0.0;
+        var h = 0.0;
+        foreach (UIElement child in Children)
+        {
+            child.Measure(childConstraint);
+            w = Math.Max(w, child.DesiredSize.Width);
+            h += child.DesiredSize.Height;
+        }
+        // 自身宽度服从容器（自身被裁无妨——不带滚动变换），高度为各行之和
+        return new Size(double.IsInfinity(constraint.Width) ? w : Math.Min(constraint.Width, w), h);
+    }
+
+    protected override Size ArrangeOverride(Size finalSize)
+    {
+        var y = 0.0;
+        foreach (UIElement child in Children)
+        {
+            var h = child.DesiredSize.Height;
+            // 排列宽度取自然宽度：小于 DesiredSize 就会触发 WPF 的 layout clip
+            child.Arrange(new Rect(0, y, Math.Max(finalSize.Width, child.DesiredSize.Width), h));
+            y += h;
+        }
+        return finalSize;
+    }
+}
+
 /// <summary>横向走马灯：超长文本在可用宽度内往返滚动（正弦缓动，两端自然减速）。</summary>
 internal static class Marquee
 {
@@ -63,12 +103,210 @@ internal static class Marquee
     }
 }
 
-public sealed class KaraokeText : NaturalMeasureGrid
+/// <summary>可横向滚动的文本宿主：文本按自然宽度排版并溢出渲染（见 NaturalMeasureGrid），
+/// 超宽时切左对齐 + 平移滚动，由外层的 ClipToBounds 容器裁成视口。
+///
+/// 视口宽度必须由容器显式告知（SetViewportWidth），不能从自身 ActualWidth 反推：
+/// 溢出时子文本会把自身撑到自然宽度，反推得到的「视口」就是文本自己的宽度，
+/// 于是 overflow 掉到阈值以下 → 还原布局 → 宽度缩回视口 → 又判定溢出，
+/// 在 SizeChanged 里无限自激振荡（长歌词/长译文忽滚忽停、尾部忽有忽无的根因）。</summary>
+public abstract class ScrollingTextHost : NaturalMeasureGrid
+{
+    /// <summary>视口两侧留白：贴着裁剪边缘的字会被切半个笔画。</summary>
+    protected const double EdgePad = 4;
+
+    /// <summary>跟随滚动的时间常数（秒）：每帧向目标逼近 1-e^(-dt/Tau)。
+    /// 稳态滞后 ≈ 滚动速度 × Tau（约 60px/s × 0.15 ≈ 9px），焦点在视口 35% 处看不出来；
+    /// 再大就跟不上快歌，再小则滤不掉逐字边界的速度突变。</summary>
+    private const double Tau = 0.15;
+
+    private double _viewportW;
+    private double _naturalW;
+    private double _targetX;              // 目标左移量（px，非负）
+    private double _curX;                 // 当前左移量（每帧向目标逼近）
+    private TranslateTransform? _tt;
+    private bool _following;              // 已订阅渲染帧
+    private double _lastFrameMs = double.NaN;
+
+    /// <summary>可用视口宽度（DIP，已扣除两侧留白）。</summary>
+    protected double Avail => _viewportW - EdgePad;
+    /// <summary>文本按目标字号的自然排版宽度（DIP）。</summary>
+    protected double NaturalWidth => _naturalW;
+    /// <summary>当前是否处于滚动状态。</summary>
+    public bool Overflowing { get; private set; }
+    /// <summary>需要滚动的距离（DIP）；不滚动时为 0。
+    /// 按 Avail 算而非视口宽：滚到底时尾字停在距右缘 EdgePad 处，不贴边。</summary>
+    public double Overflow => Overflowing ? _naturalW - Avail : 0;
+    /// <summary>当前横向滚动比例（0~1；供译文与原文同步滚动）。
+    /// 取目标值而非当前视觉值：译文自己也做平滑，两级平滑会累积滞后。</summary>
+    public double ScrollFraction { get; private set; }
+
+    protected ScrollingTextHost()
+    {
+        // 行元素会被切行动画换掉（传送带/淡出后 Remove）。CompositionTarget.Rendering
+        // 是静态事件，漏退订会让整行连同文本、阴影一直被根引用着不回收
+        Unloaded += (_, _) => StopFollowing();
+    }
+
+    /// <summary>容器告知可用视口宽度（DIP）。窗口宽度随歌词长度/任务栏空档变化，
+    /// 每次变化都要重算溢出：否则滚动距离一直用切行那一刻的旧视口值，
+    /// 窗口变宽后仍按旧值滚动，尾部被推出视口（「滚动后半段不显示」的根因）。</summary>
+    public void SetViewportWidth(double dip)
+    {
+        if (Math.Abs(dip - _viewportW) < 0.5) return;
+        _viewportW = dip;
+        RefreshOverflow();
+    }
+
+    /// <summary>子类在文本/字号变化后告知新的自然宽度。</summary>
+    protected void SetNaturalWidth(double natural)
+    {
+        _naturalW = natural;
+        RefreshOverflow();
+    }
+
+    private void RefreshOverflow()
+    {
+        // 只要超出真实视口就滚动。不留「误差容忍阈值」：测量已与排版一致（见 MeasureTextWidth），
+        // 阈值只会变成死区——文字确实超了视口却不滚，尾部被裁掉那一点（阈值有多大就能裁多少）。
+        // 视口宽由窗口宽决定、与本元素是否滚动无关，所以不存在状态来回翻转的反馈回路
+        Overflowing = _viewportW > 0 && _naturalW > _viewportW;
+        if (!Overflowing)
+        {
+            ScrollFraction = 0;
+            StopFollowing();
+            _targetX = 0;
+            _curX = 0;
+            _tt = null;
+            RenderTransform = null;
+        }
+        else
+        {
+            // 视口/文本变了，滚动行程也变了：把当前位移按新行程夹住，避免超出后被拉回
+            _targetX = Math.Clamp(_targetX, 0, Overflow);
+            _curX = Math.Clamp(_curX, 0, Overflow);
+        }
+        OnOverflowChanged(Overflowing);
+    }
+
+    /// <summary>溢出状态或滚动距离变化：子类据此切对齐、起停走马灯。</summary>
+    protected abstract void OnOverflowChanged(bool overflowing);
+
+    /// <summary>设定目标左移量（自动限幅到 [0, Overflow]），由渲染帧平滑逼近。
+    ///
+    /// 不能用 BeginAnimation 逐帧重定目标：DoubleAnimation 只给 To 时起点取属性
+    /// 「基值」（恒 0）而非当前动画值，于是每帧重启的动画都从 0 跑向新目标、
+    /// 只跑出第一小段就被下一帧替换——文本始终追不上目标，直到某个字的间隙里
+    /// 目标稳住，动画才跑完猛跳一大截（实测 97% 的帧完全不动，剩下几帧跳 40px，
+    /// 也就是长歌词滚动「一卡一卡」的根因）。改为逐渲染帧做一阶低通：
+    /// 输出严格连续，逐字边界的速度突变和进度校准的跳变都会被滤平。</summary>
+    protected void ScrollToPixels(double px)
+    {
+        var overflow = Overflow;
+        if (overflow <= 0) return;
+        var target = Math.Clamp(px, 0, overflow);
+        if (Math.Abs(target - _targetX) < 0.01) return;
+        _targetX = target;
+        ScrollFraction = target / overflow;
+        StartFollowing();
+    }
+
+    /// <summary>直接把位移设到目标（切行/重建时用，不做动画）。</summary>
+    protected void SnapScroll(double px)
+    {
+        var overflow = Overflow;
+        _targetX = overflow > 0 ? Math.Clamp(px, 0, overflow) : 0;
+        _curX = _targetX;
+        ScrollFraction = overflow > 0 ? _targetX / overflow : 0;
+        ApplyOffset();
+    }
+
+    private void StartFollowing()
+    {
+        if (_following) return;
+        _following = true;
+        _lastFrameMs = double.NaN;
+        CompositionTarget.Rendering += OnRendering;
+    }
+
+    private void StopFollowing()
+    {
+        if (!_following) return;
+        _following = false;
+        CompositionTarget.Rendering -= OnRendering;
+    }
+
+    private void OnRendering(object? sender, EventArgs e)
+    {
+        var ms = e is RenderingEventArgs re ? re.RenderingTime.TotalMilliseconds : double.NaN;
+        var dt = 1 / 60.0;
+        if (!double.IsNaN(ms))
+        {
+            if (!double.IsNaN(_lastFrameMs))
+                dt = Math.Clamp((ms - _lastFrameMs) / 1000.0, 0.001, 0.1); // 掉帧时限幅，避免一步跳到位
+            _lastFrameMs = ms;
+        }
+
+        var diff = _targetX - _curX;
+        if (Math.Abs(diff) < 0.05)
+        {
+            _curX = _targetX;
+            ApplyOffset();
+            StopFollowing(); // 已到位就停订阅，静止时不占渲染回调
+            return;
+        }
+        // 一阶低通（指数逼近）：与帧长无关，掉帧也不会突进
+        _curX += diff * (1 - Math.Exp(-dt / Tau));
+        ApplyOffset();
+    }
+
+    private void ApplyOffset()
+    {
+        if (_tt == null)
+        {
+            if (RenderTransform is TranslateTransform existing)
+            {
+                _tt = existing;
+            }
+            else
+            {
+                _tt = new TranslateTransform();
+                RenderTransform = _tt;
+            }
+            // 走马灯留下的动画会锁死 X 属性，本地赋值将无效
+            _tt.BeginAnimation(TranslateTransform.XProperty, null);
+        }
+        _tt.X = -_curX;
+    }
+
+    /// <summary>走马灯要接管 X 属性动画，先让平滑跟随让位。</summary>
+    protected void ReleaseForMarquee()
+    {
+        StopFollowing();
+        _tt = null;
+        _targetX = 0;
+        _curX = 0;
+    }
+
+    /// <summary>本元素所在视觉树的 DPI 缩放（未入树时退回系统主 DPI）。</summary>
+    protected double DpiScale()
+    {
+        var dpi = VisualTreeHelper.GetDpi(this);
+        return dpi.PixelsPerDip > 0 ? dpi.PixelsPerDip : 1.0;
+    }
+}
+
+public sealed class KaraokeText : ScrollingTextHost
 {
     public const double PendingAlpha = 140.0 / 255.0; // 未唱到歌词的透明度（对应 render.py PENDING_ALPHA）
 
+    /// <summary>正在唱的位置在视口中保持的位置（对标 Lyricify，约 1/3 处）。</summary>
+    private const double FocusRatio = 0.35;
+
     private readonly TextBlock _pending;
     private readonly TextBlock _accent;
+    /// <summary>高亮裁剪矩形：只改 Rect 不重建，避免逐帧产生新几何对象。</summary>
+    private readonly RectangleGeometry _accentClip = new(new Rect(0, -1000, 0, 12000));
     private IReadOnlyList<KaraokeWord>? _words;
     private List<double> _wordStartX = new();
     private List<double> _wordEndX = new();
@@ -76,6 +314,8 @@ public sealed class KaraokeText : NaturalMeasureGrid
     private FontWeight _targetWeight = FontWeights.Normal;
     private string _text = "";
     private HorizontalAlignment _align = HorizontalAlignment.Center;
+    /// <summary>切行后首次定位：瞬时到位而不是从行首缓滚过去（从中途接上播放时）。</summary>
+    private bool _needSnap = true;
 
     public static readonly DependencyProperty PositionMsProperty =
         DependencyProperty.Register(nameof(PositionMs), typeof(double), typeof(KaraokeText),
@@ -94,7 +334,6 @@ public sealed class KaraokeText : NaturalMeasureGrid
         _accent = MakeBlock();
         Children.Add(_pending);
         Children.Add(_accent);
-        SizeChanged += (_, _) => { UpdateScroll(); UpdateClip(); };
     }
 
     private static TextBlock MakeBlock() => new()
@@ -117,22 +356,22 @@ public sealed class KaraokeText : NaturalMeasureGrid
         _accent.Text = text;
         _pending.FontFamily = family;
         _accent.FontFamily = family;
-        _pending.FontWeight = weight ?? FontWeights.Normal;
-        _accent.FontWeight = weight ?? FontWeights.Normal;
+        _pending.FontSize = fontSizeDip;
+        _accent.FontSize = fontSizeDip;
+        _pending.FontWeight = _targetWeight;
+        _accent.FontWeight = _targetWeight;
         _pending.Foreground = pending;
         _accent.Foreground = bright;
-        _pending.HorizontalAlignment = align;
-        _accent.HorizontalAlignment = align;
         // 固定行高（1.3 倍字号 ≈ 自然行距）：原文/译文间保留舒适间距，整组垂直居中
         var lh = Math.Ceiling(fontSizeDip * 1.3);
         _pending.LineHeight = lh;
         _accent.LineHeight = lh;
         _pending.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
         _accent.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
-        // 阴影挂在 TextBlock 上而非整格：走马灯时文本超出容器宽度，
+        // 阴影挂在 TextBlock 上而非整格：滚动时文本超出容器宽度，
         // 容器级 Effect 会把超出部分先裁进位图，尾部看不到。
         // 粗笔画配大半径阴影会糊成毛边，加粗时换更轻的影子
-        var bold = (weight ?? FontWeights.Normal) >= FontWeights.SemiBold;
+        var bold = _targetWeight >= FontWeights.SemiBold;
         var effect = shadow
             ? new DropShadowEffect
             {
@@ -146,21 +385,26 @@ public sealed class KaraokeText : NaturalMeasureGrid
         _accent.Effect = effect;
         _pending.Visibility = words != null ? Visibility.Visible : Visibility.Collapsed;
         _accent.Clip = null;
-        FitFont();
+        _needSnap = true; // 从中途接上播放时，滚动位置直接到位，不从行首缓滚一段
+        RebuildWordWidths(_targetFontSize);
+        // 不给 TextBlock 显式 Width：父容器已让文本按自然宽度排版并溢出渲染，
+        // 而显式宽度只能取自测量值——与真实排版宽度的任何偏差都会变成尾部被裁或右侧空隙
+        SetNaturalWidth(MeasureWidth(_text, _targetFontSize));
         UpdateClip();
-    }
-
-    private double DpiScale()
-    {
-        var dpi = VisualTreeHelper.GetDpi(this);
-        return dpi.PixelsPerDip > 0 ? dpi.PixelsPerDip : 1.0;
     }
 
     private double MeasureWidth(string text, double fontSize)
         => MeasureTextWidth(text, _accent.FontFamily, fontSize, DpiScale(), _targetWeight);
 
     /// <summary>测量任意文本宽度（供译文行与窗口紧凑布局用）。
-    /// 字重必须与实际渲染一致：雅黑 Bold 比 Regular 宽一截，按细字测量会导致
+    ///
+    /// 排版模式必须与渲染一致：应用里文字渲染是 TextFormattingMode.Display
+    /// （OverlayWindow.xaml 的 Root 上设置，可继承），而 FormattedText 默认用 Ideal。
+    /// Ideal 按亚像素精度排版，实测比 Display 的真实排版宽度大 8~17px（越长越大），
+    /// 这段虚高会同时污染滚动距离、逐字高亮边界（误差随前缀累积）和窗口宽度。
+    /// Display 模式量化到整像素，测出的宽度与 TextBlock 实际排版宽度完全一致。
+    ///
+    /// 字重也必须与实际渲染一致：雅黑 Bold 比 Regular 宽一截，按细字测量会导致
     /// 窗口定窄（粗字超框）、滚动不触发（以为没超）、逐字边界错位。</summary>
     public static double MeasureTextWidth(string text, FontFamily family, double fontSize,
         double pixelsPerDip, FontWeight? weight = null)
@@ -168,68 +412,30 @@ public sealed class KaraokeText : NaturalMeasureGrid
         if (text.Length == 0) return 0;
         var ft = new FormattedText(text, CultureInfo.CurrentUICulture, FlowDirection.LeftToRight,
             new Typeface(family, FontStyles.Normal, weight ?? FontWeights.Normal, FontStretches.Normal),
-            fontSize, Brushes.Black, pixelsPerDip);
+            fontSize, Brushes.Black, null, TextFormattingMode.Display, pixelsPerDip);
         return ft.WidthIncludingTrailingWhitespace;
     }
 
     /// <summary>按目标字号测量当前行文本宽度（供窗口紧凑布局用）。</summary>
     public double MeasureLineWidth() => MeasureWidth(_text, _targetFontSize);
 
-    /// <summary>按目标字号渲染并预计算逐字宽度；超长不缩字号，交给滚动。</summary>
-    private void FitFont()
-    {
-        if (_text.Length == 0) return;
-        _pending.FontSize = _targetFontSize;
-        _accent.FontSize = _targetFontSize;
-        // 无条件显式给定自然宽度：DropShadowEffect 会按「排版宽度」先把文本渲成位图，
-        // 若在排版后才（在 SizeChanged 的溢出分支里）补宽度，超出容器的尾部已被裁掉，
-        // 滚动时也永远看不到（「滚到后面就不显示」的根因）；
-        // 短文本设自然宽度后居中/左对齐视觉效果不变
-        var natural = MeasureWidth(_text, _targetFontSize);
-        _pending.Width = natural;
-        _accent.Width = natural;
-        RebuildWordWidths(_targetFontSize);
-        UpdateScroll();
-    }
-
-    /// <summary>当前横向滚动比例（0~1，跟随逐字播放进度；供译文同步滚动）。</summary>
-    public double ScrollFraction { get; private set; }
-
-    private double _overflow; // 文本超出视口的宽度（>10 时才启用滚动）
-
     /// <summary>文本明显超宽时切换为左对齐 + 横向滚动（有逐字数据时跟随播放进度，
     /// 无逐字数据时往返走马灯兜底）。</summary>
-    private void UpdateScroll()
+    protected override void OnOverflowChanged(bool overflowing)
     {
-        if (_text.Length == 0) return;
-        var natural = MeasureWidth(_text, _targetFontSize);
-        // 视口宽取父容器：本元素超宽时自身 Width 会被设为自然宽度，
-        // 再拿 ActualWidth 当视口就错了
-        var viewportW = (Parent as FrameworkElement)?.ActualWidth ?? ActualWidth;
-        var avail = viewportW - 4;
-        _overflow = natural - avail;
-        if (_overflow > 10 && avail > 0) // 阈值 10px：微小测量误差不触发，避免无故左右晃
+        var ha = overflowing ? HorizontalAlignment.Left : _align;
+        _pending.HorizontalAlignment = ha;
+        _accent.HorizontalAlignment = ha;
+        if (overflowing && _words == null)
         {
-            // 自身也要给足自然宽度：带平移变换的元素会先按自身边界渲成中间表面，
-            // 自身只有视口宽的话，内容先被裁成视口宽再移动，滚动也看不到尾部
-            Width = natural;
-            _pending.HorizontalAlignment = HorizontalAlignment.Left;
-            _accent.HorizontalAlignment = HorizontalAlignment.Left;
-            if (_words == null)
-                Marquee.Apply(this, _overflow); // 无逐字：往返滚动兜底
-            else
-                Marquee.Clear(this);            // 有逐字：由 UpdateClip 跟随进度滚动
+            ReleaseForMarquee();           // 走马灯要接管 X 属性动画
+            Marquee.Apply(this, Overflow); // 无逐字：往返滚动兜底
         }
         else
         {
-            _overflow = 0;
-            ScrollFraction = 0;
-            Width = double.NaN;
-            _pending.HorizontalAlignment = _align;
-            _accent.HorizontalAlignment = _align;
-            Marquee.Clear(this);
-            RenderTransform = null;
+            Marquee.Clear(this);           // 有逐字：由 UpdateClip 跟随进度滚动
         }
+        if (overflowing) UpdateClip();     // 视口变化后立即按新距离重定滚动位置
     }
 
     /// <summary>预计算每个字的起止 x（相对文本起点），逐帧查表免测量。</summary>
@@ -277,27 +483,93 @@ public sealed class KaraokeText : NaturalMeasureGrid
             }
         }
         if (boundary < 0) boundary = 0;
-        // Clip 只需裁右边界，高度给足避免布局时序问题
-        _accent.Clip = new RectangleGeometry(new Rect(0, -1000, boundary, 12000));
+        // Clip 只需裁右边界，高度给足避免布局时序问题。改 Rect 而不重建几何：
+        // 逐帧 new RectangleGeometry 会每帧重挂 Clip 属性并产生垃圾
+        _accentClip.Rect = new Rect(0, -1000, boundary, 12000);
+        if (!ReferenceEquals(_accent.Clip, _accentClip)) _accent.Clip = _accentClip;
 
-        // 横向滚动跟随逐字进度：正在唱的位置保持在视口约 35% 处（对标 Lyricify），
-        // 每 50ms 重定目标的短动画形成平滑跟随
-        if (_overflow > 10)
+        // 横向滚动跟随逐字进度：正在唱的位置保持在视口约 35% 处
+        if (!Overflowing) return;
+        var scrollTo = boundary - Avail * FocusRatio;
+        if (_needSnap)
         {
-            var viewportW = (Parent as FrameworkElement)?.ActualWidth ?? ActualWidth;
-            var avail = viewportW - 4;
-            var target = Math.Clamp(boundary - avail * 0.35, 0, _overflow);
-            ScrollFraction = target / _overflow;
-            if (RenderTransform is not TranslateTransform tt)
-            {
-                tt = new TranslateTransform();
-                RenderTransform = tt;
-            }
-            tt.BeginAnimation(TranslateTransform.XProperty,
-                new DoubleAnimation(-target, TimeSpan.FromMilliseconds(120))
-                {
-                    EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut },
-                });
+            _needSnap = false;
+            SnapScroll(scrollTo);
+        }
+        else
+        {
+            ScrollToPixels(scrollTo);
+        }
+    }
+}
+
+/// <summary>第二行文本（译文 / 罗马音 / 下一句）。与原文同样的溢出滚动机制：
+/// 原文有逐字数据时按原文进度比例同步滚动，否则走马灯兜底。</summary>
+public sealed class TranslationText : ScrollingTextHost
+{
+    private readonly TextBlock _tb;
+    private HorizontalAlignment _align = HorizontalAlignment.Center;
+    private bool _followProgress;
+    private bool _needSnap = true;
+
+    public TranslationText()
+    {
+        _tb = new TextBlock
+        {
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        Children.Add(_tb);
+    }
+
+    /// <summary>设置第二行文本。followProgress=true 时不启走马灯，
+    /// 改由 ScrollToFraction 跟随原文逐字进度。</summary>
+    public void SetText(string text, FontFamily family, double fontSizeDip, Brush foreground,
+        bool shadow, HorizontalAlignment align, bool followProgress)
+    {
+        _align = align;
+        _followProgress = followProgress;
+        _needSnap = true;
+        _tb.Text = text;
+        _tb.FontFamily = family;
+        _tb.FontSize = fontSizeDip;
+        _tb.Foreground = foreground;
+        _tb.LineHeight = Math.Ceiling(fontSizeDip * 1.3); // 与原文同规则固定行高，保留行间距
+        _tb.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
+        // 小字号用更轻的阴影，避免发虚；同样挂在 TextBlock 上（容器级会裁掉滚动尾部）
+        _tb.Effect = shadow
+            ? new DropShadowEffect { Color = Colors.Black, BlurRadius = 3, ShadowDepth = 0, Opacity = 0.5 }
+            : null;
+        SetNaturalWidth(KaraokeText.MeasureTextWidth(text, family, fontSizeDip, DpiScale()));
+    }
+
+    protected override void OnOverflowChanged(bool overflowing)
+    {
+        _tb.HorizontalAlignment = overflowing ? HorizontalAlignment.Left : _align;
+        if (overflowing && !_followProgress)
+        {
+            ReleaseForMarquee();
+            Marquee.Apply(this, Overflow); // 无逐字：往返滚动兜底
+        }
+        else
+        {
+            Marquee.Clear(this);
+        }
+    }
+
+    /// <summary>按原文滚动比例同步滚动（0~1）。</summary>
+    public void ScrollToFraction(double fraction)
+    {
+        if (!Overflowing || !_followProgress) return;
+        var px = fraction * Overflow;
+        if (_needSnap)
+        {
+            _needSnap = false;
+            SnapScroll(px); // 从中途接上播放时直接到位
+        }
+        else
+        {
+            ScrollToPixels(px);
         }
     }
 }
