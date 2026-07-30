@@ -361,7 +361,7 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
                                         <TextBlock Style="{StaticResource RowTitle}" Text="自动避让任务栏元素"/>
-                                        <TextBlock Style="{StaticResource RowDesc}" Text="自动调整位置与宽度，不与任务栏图标和托盘重叠（开启后任务栏内拖动停用，仅任务栏模式生效）"/>
+                                        <TextBlock Style="{StaticResource RowDesc}" Text="自动停靠在任务栏空档里，宽度随可用空间伸缩，永不与图标托盘重叠（开启后任务栏内拖动停用，仅任务栏模式生效）"/>
                                     </StackPanel>
                                     <ToggleButton x:Name="AutoPositionSwitch" Grid.Column="1" Style="{StaticResource Switch}"
                                                   VerticalAlignment="Center"/>

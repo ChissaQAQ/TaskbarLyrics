@@ -575,26 +575,33 @@ public partial class OverlayWindow : Window
             contentW = Math.Max(contentW, _lyricsWidthDip);
         var targetWidth = contentW + coverZone + buttonsZone;
 
-        // 自动避让任务栏元素：先算空档，窗口比空档宽就收缩内容宽度
-        _autoGap = null;
+        // 自动避让任务栏元素：窗口宽度跟随空档——空档内尽量用满
+        // （上限 = 设置的最大宽度 + 封面 + 按钮），空档收窄时同步收窄，
+        // 空间怎么变窗口就怎么变；UIA 失败时沿用上次成功的空档
         if (Cfg.Mode == "taskbar" && Cfg.AutoPosition)
         {
             var (trayHwnd, _) = NativeMethods.ResolveTaskbar(Cfg.Monitor);
             if (trayHwnd != IntPtr.Zero)
             {
                 var dpi = DpiScaleX();
-                _autoGap = TaskbarFreeSpace.FindBestGap(
-                    trayHwnd, _hwnd, (int)Math.Round(targetWidth * dpi), CurrentTrayX(trayHwnd), Cfg.AutoSide);
+                var wantDip = Cfg.Width + coverZone + buttonsZone;
+                var gap = TaskbarFreeSpace.FindBestGap(
+                    trayHwnd, _hwnd, (int)Math.Round(wantDip * dpi), CurrentTrayX(trayHwnd), Cfg.AutoSide);
+                if (gap.HasValue) _autoGap = gap.Value; // 失败则沿用旧空档，不回退跳位
                 if (_autoGap.HasValue)
                 {
-                    var gapDip = (_autoGap.Value.R - _autoGap.Value.L) / dpi;
-                    if (targetWidth > gapDip)
-                    {
-                        contentW = Math.Max(40, gapDip - coverZone - buttonsZone);
-                        targetWidth = gapDip;
-                    }
+                    var g = _autoGap.Value;
+                    var gapDip = (g.R - g.L - 8) / dpi; // 两侧各留 4px，不与图标贴边
+                    var want = Math.Min(gapDip, wantDip);
+                    if (want < 40) want = Math.Max(24, gapDip);
+                    contentW = Math.Max(24, want - coverZone - buttonsZone);
+                    targetWidth = contentW + coverZone + buttonsZone;
                 }
             }
+        }
+        else
+        {
+            _autoGap = null;
         }
 
         // 视觉布局同步
@@ -643,17 +650,13 @@ public partial class OverlayWindow : Window
 
             int x;
             var coverZonePx = (int)Math.Round(_lastCoverZoneDip * DpiScaleX());
-            var buttonsZonePx = _showingButtons ? (int)Math.Round(ButtonsWidth * DpiScaleX()) : 0;
             if (_autoGap.HasValue)
             {
-                // 自动避让确定性锚点：位置只由当前空档决定——空间收窄被挤走、
-                // 恢复时自动回来（实测：「保持当前位置」会被挤走后永远留在原地）。
-                // 左对齐钉空档左缘（文字左缘逐行不动）；
-                // 居中对齐让文字（而非含封面的整窗）钉在空档中心
+                // 自动避让：钉停靠侧的边缘（右半边靠托盘、左半边靠开始按钮），各留 4px。
+                // 窗口宽度随行不变（填充式），文字位置因此也逐行稳定；
+                // 悬停加宽时右钉向左扩，文字原地不动
                 var g = _autoGap.Value;
-                x = IsLeftAlign
-                    ? g.L
-                    : (g.L + g.R - widthPx - coverZonePx - buttonsZonePx) / 2;
+                x = Cfg.AutoSide == "left" ? g.L + 4 : g.R - 4 - widthPx;
             }
             else if (Cfg.Position == "custom" && (Cfg.XOffset.HasValue || Cfg.XCenter.HasValue))
             {

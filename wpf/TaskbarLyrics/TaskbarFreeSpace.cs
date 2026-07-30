@@ -75,8 +75,10 @@ public static class TaskbarFreeSpace
         }
         catch
         {
-            raw.Clear(); // UIA 失败时视为无占用信息，回退默认摆放
+            raw.Clear();
         }
+        if (raw.Count == 0 && _cacheTray == trayHwnd && _cacheOcc.Count > 0)
+            return _cacheOcc; // 查询整体失败时沿用上次成功的结果（不触发回退跳位）
 
         raw.Sort((a, b) => a.L.CompareTo(b.L));
         var merged = new List<(int L, int R)>();
@@ -94,7 +96,8 @@ public static class TaskbarFreeSpace
     }
 
     /// <summary>递归收集占用矩形：接近全宽的容器继续拆，其余元素计入占用；
-    /// 本程序的覆盖窗口（按句柄排除）不算占用。</summary>
+    /// 本程序的覆盖窗口（按句柄排除）不算占用。
+    /// 单个元素失效（任务栏更新时元素瞬断很常见）只跳过，不拖垮整个查询。</summary>
     private static void Collect(AutomationElement el, int trayWidth, int trayScreenLeft,
         IntPtr excludeHwnd, List<(int L, int R)> acc)
     {
@@ -103,17 +106,22 @@ public static class TaskbarFreeSpace
         catch { return; }
         foreach (AutomationElement k in kids)
         {
-            System.Windows.Rect r;
-            try { r = k.Current.BoundingRectangle; }
-            catch { continue; }
-            if (r.Width <= 0 || r.Height <= 0) continue;
-            if (r.Width >= trayWidth * 0.9)
+            try
             {
-                Collect(k, trayWidth, trayScreenLeft, excludeHwnd, acc); // 全宽容器继续拆
-                continue;
+                var r = k.Current.BoundingRectangle;
+                if (r.Width <= 0 || r.Height <= 0) continue;
+                if (r.Width >= trayWidth * 0.9)
+                {
+                    Collect(k, trayWidth, trayScreenLeft, excludeHwnd, acc); // 全宽容器继续拆
+                    continue;
+                }
+                if (k.Current.NativeWindowHandle == excludeHwnd.ToInt32()) continue; // 跳过自己
+                acc.Add(((int)r.Left - trayScreenLeft, (int)r.Right - trayScreenLeft));
             }
-            if (k.Current.NativeWindowHandle == excludeHwnd.ToInt32()) continue; // 跳过自己
-            acc.Add(((int)r.Left - trayScreenLeft, (int)r.Right - trayScreenLeft));
+            catch
+            {
+                // 该元素刚好被销毁/不可用，跳过即可
+            }
         }
     }
 }
