@@ -11,19 +11,19 @@ public sealed class AppConfig
 {
     // 外观
     [JsonPropertyName("font_family")] public string FontFamily { get; set; } = "Microsoft YaHei UI";
-    [JsonPropertyName("font_size")] public int FontSize { get; set; } = 13;            // 原文字号
-    [JsonPropertyName("font_bold")] public bool FontBold { get; set; } = true;         // 原文半粗（任务栏上更清晰，译文保持常规）
+    [JsonPropertyName("font_size")] public int FontSize { get; set; } = 12;            // 原文字号
+    [JsonPropertyName("font_bold")] public bool FontBold { get; set; }               // 原文半粗（译文保持常规）
     [JsonPropertyName("text_color")] public string TextColor { get; set; } = "#FFFFFF";
     [JsonPropertyName("trans_color")] public string TransColor { get; set; } = "#C8C8C8";
     [JsonPropertyName("highlight_color")] public string? HighlightColor { get; set; }  // 预留，None = 跟随系统强调色
     [JsonPropertyName("shadow")] public bool Shadow { get; set; } = true;              // 文字阴影
-    [JsonPropertyName("width")] public int Width { get; set; } = 560;                  // 歌词区最大宽度（紧凑布局下内容更窄时收缩，超出才缩字号）
-    [JsonPropertyName("text_align")] public string TextAlign { get; set; } = "center"; // center | left（配封面时左对齐更整齐）
+    [JsonPropertyName("width")] public int Width { get; set; } = 280;                  // 歌词区最大宽度（紧凑布局下内容更窄时收缩，超出才缩字号）
+    [JsonPropertyName("text_align")] public string TextAlign { get; set; } = "left"; // center | left（配封面时左对齐更整齐）
     [JsonPropertyName("show_controls")] public bool ShowControls { get; set; } = true; // 悬停播放控制按钮
     // 位置
     [JsonPropertyName("mode")] public string Mode { get; set; } = "taskbar";           // taskbar | floating
-    [JsonPropertyName("position")] public string Position { get; set; } = "tray_left"; // tray_left | left | center | right | custom
-    [JsonPropertyName("auto_position")] public bool AutoPosition { get; set; }         // 自动避让任务栏元素（覆盖 position）
+    [JsonPropertyName("position")] public string Position { get; set; } = "custom";    // tray_left | left | center | right | custom
+    [JsonPropertyName("auto_position")] public bool AutoPosition { get; set; } = true; // 自动避让任务栏元素（覆盖 position）
     [JsonPropertyName("auto_side")] public string AutoSide { get; set; } = "right";    // 避让停靠侧：left | right（优先待在哪半边）
     [JsonPropertyName("auto_align")] public string AutoAlign { get; set; } = "left";   // 空档内停靠对齐：left | right | center
     [JsonPropertyName("x_offset")] public int? XOffset { get; set; }                   // position=custom 时任务栏内 x（左缘锚点）
