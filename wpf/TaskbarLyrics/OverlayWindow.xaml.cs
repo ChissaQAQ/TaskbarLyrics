@@ -85,6 +85,7 @@ public partial class OverlayWindow : Window
         {
             _hwnd = new WindowInteropHelper(this).Handle;
             SetLocked(Cfg.Locked);
+            ApplyTextRendering();
             Dock();
             // 前台切换即时重摆：任务栏 XAML 层在前台变化瞬间会盖住嵌入窗口，
             // 不等 1.5s 周期兜底，收到事件立刻重断言位置与 z-order
@@ -186,8 +187,16 @@ public partial class OverlayWindow : Window
                 var sb = new Storyboard();
                 AddAnim(sb, oldLine, new PropertyPath("(UIElement.RenderTransform).(TranslateTransform.Y)"), -pitch, easingIn: false);
                 AddAnim(sb, visual, new PropertyPath("(UIElement.RenderTransform).(TranslateTransform.Y)"), 0, easingIn: false);
+                // 共享句 morph：旧「下一句」是小号灰字、新「当前句」是大号白字，
+                // 刚性平移会让两种渲染全程叠影（「残留」的根因）——
+                // 旧下行在滑行中淡出、新上行淡入，小灰字滑上去的同时变成大白字
+                var oldBottom = (FrameworkElement)osp2.Children[1];
+                AddAnim(sb, oldBottom, new PropertyPath("Opacity"), 0, easingIn: false);
                 if (visual is StackPanel nsp && nsp.Children.Count > 1)
                 {
+                    var top = (FrameworkElement)nsp.Children[0];
+                    top.Opacity = 0;
+                    AddAnim(sb, top, new PropertyPath("Opacity"), 1, easingIn: false);
                     // 新的“下一句”淡入
                     var bottom = (FrameworkElement)nsp.Children[1];
                     bottom.Opacity = 0;
@@ -757,9 +766,19 @@ public partial class OverlayWindow : Window
     public void ApplyLayout(string? currentOriginal, string currentTranslation,
         IReadOnlyList<KaraokeWord>? words, double lineElapsedMs, bool playing)
     {
+        ApplyTextRendering();
         Dock();
         if (currentOriginal != null)
             SetLine(currentOriginal, currentTranslation, words, lineElapsedMs, playing);
+    }
+
+    /// <summary>按字重选择文字渲染：粗笔画在分层透明窗上用 ClearType 子像素渲染
+    /// 会在边缘留下彩色毛边（加粗后「毛刺感」的来源），灰阶抗锯齿配粗笔画更干净；
+    /// 细字重则仍需 ClearType 保持锐利。</summary>
+    private void ApplyTextRendering()
+    {
+        RenderOptions.SetClearTypeHint(Root,
+            Cfg.FontBold ? ClearTypeHint.Auto : ClearTypeHint.Enabled);
     }
 
     // ---- 拖动 / 右键 ----

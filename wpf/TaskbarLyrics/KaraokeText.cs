@@ -103,11 +103,19 @@ public sealed class KaraokeText : Grid
         _accent.LineHeight = lh;
         _pending.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
         _accent.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
-        var effect = shadow
-            ? new DropShadowEffect { Color = Colors.Black, BlurRadius = 6, ShadowDepth = 0, Opacity = 0.6 }
-            : null;
         // 阴影挂在 TextBlock 上而非整格：走马灯时文本超出容器宽度，
-        // 容器级 Effect 会把超出部分先裁进位图，尾部看不到
+        // 容器级 Effect 会把超出部分先裁进位图，尾部看不到。
+        // 粗笔画配大半径阴影会糊成毛边，加粗时换更轻的影子
+        var bold = (weight ?? FontWeights.Normal) >= FontWeights.SemiBold;
+        var effect = shadow
+            ? new DropShadowEffect
+            {
+                Color = Colors.Black,
+                BlurRadius = bold ? 3.5 : 6,
+                ShadowDepth = 0,
+                Opacity = bold ? 0.45 : 0.6,
+            }
+            : null;
         _pending.Effect = effect;
         _accent.Effect = effect;
         _pending.Visibility = words != null ? Visibility.Visible : Visibility.Collapsed;
