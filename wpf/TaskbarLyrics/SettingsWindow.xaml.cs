@@ -61,6 +61,7 @@ public partial class SettingsWindow : Window
         MonitorCombo.SelectedIndex = Math.Clamp(cfg.Monitor, 0, Math.Max(0, mons.Count - 1));
 
         HideFullscreenSwitch.IsChecked = cfg.HideOnFullscreen;
+        AutoPositionSwitch.IsChecked = cfg.AutoPosition;
         LockedSwitch.IsChecked = cfg.Locked;
         AutostartSwitch.IsChecked = Autostart.IsEnabled();
 
@@ -138,6 +139,7 @@ public partial class SettingsWindow : Window
         cfg.Mode = ModeCombo.SelectedIndex == 1 ? "floating" : "taskbar";
         if (MonitorCombo.SelectedIndex >= 0) cfg.Monitor = MonitorCombo.SelectedIndex;
         cfg.HideOnFullscreen = HideFullscreenSwitch.IsChecked == true;
+        cfg.AutoPosition = AutoPositionSwitch.IsChecked == true;
         cfg.SecondLine = secondLine;
         cfg.Karaoke = karaoke;
         cfg.OffsetMs = Math.Clamp((int)(offsetS * 1000), -3000, 3000);

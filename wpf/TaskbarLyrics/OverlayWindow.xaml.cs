@@ -59,6 +59,7 @@ public partial class OverlayWindow : Window
 
     private double _displayWidthDip = 120; // 当前实际窗口宽
     private int _lastHeightDip = 48;
+    private (int L, int R)? _autoGap;      // 自动避让算出的任务栏空档（client 像素坐标）
 
     // WinEvent 前台钩子（切前台时即时重摆，不等 1.5s 周期）
     private NativeMethods.WinEventDelegate? _winEventProc;
@@ -574,6 +575,28 @@ public partial class OverlayWindow : Window
             contentW = Math.Max(contentW, _lyricsWidthDip);
         var targetWidth = contentW + coverZone + buttonsZone;
 
+        // 自动避让任务栏元素：先算空档，窗口比空档宽就收缩内容宽度
+        _autoGap = null;
+        if (Cfg.Mode == "taskbar" && Cfg.AutoPosition)
+        {
+            var (trayHwnd, _) = NativeMethods.ResolveTaskbar(Cfg.Monitor);
+            if (trayHwnd != IntPtr.Zero)
+            {
+                var dpi = DpiScaleX();
+                _autoGap = TaskbarFreeSpace.FindBestGap(
+                    trayHwnd, _hwnd, (int)Math.Round(targetWidth * dpi), CurrentTrayX(trayHwnd));
+                if (_autoGap.HasValue)
+                {
+                    var gapDip = (_autoGap.Value.R - _autoGap.Value.L) / dpi;
+                    if (targetWidth > gapDip)
+                    {
+                        contentW = Math.Max(40, gapDip - coverZone - buttonsZone);
+                        targetWidth = gapDip;
+                    }
+                }
+            }
+        }
+
         // 视觉布局同步
         Height = heightDip;
         CoverZone.Visibility = Cfg.ShowCover ? Visibility.Visible : Visibility.Collapsed;
@@ -594,6 +617,14 @@ public partial class OverlayWindow : Window
         ApplyPosition();
     }
 
+    /// <summary>窗口当前在任务栏 client 坐标系里的 x（自动避让就近选档用）。</summary>
+    private int CurrentTrayX(IntPtr trayHwnd)
+    {
+        NativeMethods.GetWindowRect(_hwnd, out var wrc);
+        NativeMethods.GetWindowRect(trayHwnd, out var trc);
+        return wrc.Left - trc.Left;
+    }
+
     /// <summary>按 _displayWidthDip 摆放窗口位置（任务栏挂靠或浮动）。</summary>
     private void ApplyPosition()
     {
@@ -612,7 +643,13 @@ public partial class OverlayWindow : Window
 
             int x;
             var coverZonePx = (int)Math.Round(_lastCoverZoneDip * DpiScaleX());
-            if (Cfg.Position == "custom" && (Cfg.XOffset.HasValue || Cfg.XCenter.HasValue))
+            if (_autoGap.HasValue)
+            {
+                // 自动避让：当前位置在空档内且不越界就不动，越界才夹回空档
+                var g = _autoGap.Value;
+                x = Math.Clamp(CurrentTrayX(tray), g.L, Math.Max(g.L, g.R - widthPx));
+            }
+            else if (Cfg.Position == "custom" && (Cfg.XOffset.HasValue || Cfg.XCenter.HasValue))
             {
                 if (CenterAnchored)
                 {
@@ -713,6 +750,7 @@ public partial class OverlayWindow : Window
     private void OnLeftDown(object sender, MouseButtonEventArgs e)
     {
         if (Cfg.Locked || _hwnd == IntPtr.Zero) return;
+        if (Cfg.Mode == "taskbar" && Cfg.AutoPosition) return; // 自动避让模式下拖动停用
         NativeMethods.GetCursorPos(out _dragCursor0);
         NativeMethods.GetWindowRect(_hwnd, out var rc);
         _dragWinX0 = rc.Left;
