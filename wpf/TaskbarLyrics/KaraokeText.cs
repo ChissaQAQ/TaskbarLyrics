@@ -12,6 +12,30 @@ using System.Windows.Media.Effects;
 
 namespace TaskbarLyrics;
 
+/// <summary>按无限宽度测量子文本的容器。
+/// WPF 的 TextBlock 按「测量宽度」排版文本：父容器按容器宽测量时，
+/// 超宽部分在排版阶段就被丢弃——即使之后给足排列宽度、加滚动变换也救不回来
+/// （超长歌词滚动后尾部不显示的根因）。这里让子文本始终按自然宽度排版，
+/// 自身宽度仍服从容器（供 StackPanel 拉伸、滚动裁剪逻辑测量视口宽）。</summary>
+public class NaturalMeasureGrid : Grid
+{
+    protected override Size MeasureOverride(Size constraint)
+    {
+        var childConstraint = new Size(double.PositiveInfinity, constraint.Height);
+        var maxH = 0.0;
+        var maxW = 0.0;
+        foreach (UIElement child in Children)
+        {
+            child.Measure(childConstraint);
+            maxH = Math.Max(maxH, child.DesiredSize.Height);
+            maxW = Math.Max(maxW, child.DesiredSize.Width);
+        }
+        // 宽度服从容器上限（不撑开父级），高度取子元素最大
+        var w = double.IsInfinity(constraint.Width) ? maxW : Math.Min(constraint.Width, maxW);
+        return new Size(w, maxH);
+    }
+}
+
 /// <summary>横向走马灯：超长文本在可用宽度内往返滚动（正弦缓动，两端自然减速）。</summary>
 internal static class Marquee
 {
@@ -39,7 +63,7 @@ internal static class Marquee
     }
 }
 
-public sealed class KaraokeText : Grid
+public sealed class KaraokeText : NaturalMeasureGrid
 {
     public const double PendingAlpha = 140.0 / 255.0; // 未唱到歌词的透明度（对应 render.py PENDING_ALPHA）
 
@@ -49,6 +73,7 @@ public sealed class KaraokeText : Grid
     private List<double> _wordStartX = new();
     private List<double> _wordEndX = new();
     private double _targetFontSize;
+    private FontWeight _targetWeight = FontWeights.Normal;
     private string _text = "";
     private HorizontalAlignment _align = HorizontalAlignment.Center;
 
@@ -86,6 +111,7 @@ public sealed class KaraokeText : Grid
         _text = text;
         _words = words;
         _targetFontSize = fontSizeDip;
+        _targetWeight = weight ?? FontWeights.Normal;
         _align = align;
         _pending.Text = text;
         _accent.Text = text;
@@ -131,14 +157,17 @@ public sealed class KaraokeText : Grid
     }
 
     private double MeasureWidth(string text, double fontSize)
-        => MeasureTextWidth(text, _accent.FontFamily, fontSize, DpiScale());
+        => MeasureTextWidth(text, _accent.FontFamily, fontSize, DpiScale(), _targetWeight);
 
-    /// <summary>测量任意文本宽度（供译文行与窗口紧凑布局用）。</summary>
-    public static double MeasureTextWidth(string text, FontFamily family, double fontSize, double pixelsPerDip)
+    /// <summary>测量任意文本宽度（供译文行与窗口紧凑布局用）。
+    /// 字重必须与实际渲染一致：雅黑 Bold 比 Regular 宽一截，按细字测量会导致
+    /// 窗口定窄（粗字超框）、滚动不触发（以为没超）、逐字边界错位。</summary>
+    public static double MeasureTextWidth(string text, FontFamily family, double fontSize,
+        double pixelsPerDip, FontWeight? weight = null)
     {
         if (text.Length == 0) return 0;
         var ft = new FormattedText(text, CultureInfo.CurrentUICulture, FlowDirection.LeftToRight,
-            new Typeface(family, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal),
+            new Typeface(family, FontStyles.Normal, weight ?? FontWeights.Normal, FontStretches.Normal),
             fontSize, Brushes.Black, pixelsPerDip);
         return ft.WidthIncludingTrailingWhitespace;
     }
@@ -146,12 +175,19 @@ public sealed class KaraokeText : Grid
     /// <summary>按目标字号测量当前行文本宽度（供窗口紧凑布局用）。</summary>
     public double MeasureLineWidth() => MeasureWidth(_text, _targetFontSize);
 
-    /// <summary>按目标字号渲染并预计算逐字宽度；超长不缩字号，交给走马灯滚动。</summary>
+    /// <summary>按目标字号渲染并预计算逐字宽度；超长不缩字号，交给滚动。</summary>
     private void FitFont()
     {
         if (_text.Length == 0) return;
         _pending.FontSize = _targetFontSize;
         _accent.FontSize = _targetFontSize;
+        // 无条件显式给定自然宽度：DropShadowEffect 会按「排版宽度」先把文本渲成位图，
+        // 若在排版后才（在 SizeChanged 的溢出分支里）补宽度，超出容器的尾部已被裁掉，
+        // 滚动时也永远看不到（「滚到后面就不显示」的根因）；
+        // 短文本设自然宽度后居中/左对齐视觉效果不变
+        var natural = MeasureWidth(_text, _targetFontSize);
+        _pending.Width = natural;
+        _accent.Width = natural;
         RebuildWordWidths(_targetFontSize);
         UpdateScroll();
     }
@@ -167,14 +203,16 @@ public sealed class KaraokeText : Grid
     {
         if (_text.Length == 0) return;
         var natural = MeasureWidth(_text, _targetFontSize);
-        var avail = ActualWidth - 4;
+        // 视口宽取父容器：本元素超宽时自身 Width 会被设为自然宽度，
+        // 再拿 ActualWidth 当视口就错了
+        var viewportW = (Parent as FrameworkElement)?.ActualWidth ?? ActualWidth;
+        var avail = viewportW - 4;
         _overflow = natural - avail;
         if (_overflow > 10 && avail > 0) // 阈值 10px：微小测量误差不触发，避免无故左右晃
         {
-            // 关键：显式给定自然宽度——否则 TextBlock 按容器宽度排版，
-            // 超出部分直接被裁掉，平移时永远看不到尾部
-            _pending.Width = natural;
-            _accent.Width = natural;
+            // 自身也要给足自然宽度：带平移变换的元素会先按自身边界渲成中间表面，
+            // 自身只有视口宽的话，内容先被裁成视口宽再移动，滚动也看不到尾部
+            Width = natural;
             _pending.HorizontalAlignment = HorizontalAlignment.Left;
             _accent.HorizontalAlignment = HorizontalAlignment.Left;
             if (_words == null)
@@ -186,8 +224,7 @@ public sealed class KaraokeText : Grid
         {
             _overflow = 0;
             ScrollFraction = 0;
-            _pending.Width = double.NaN;
-            _accent.Width = double.NaN;
+            Width = double.NaN;
             _pending.HorizontalAlignment = _align;
             _accent.HorizontalAlignment = _align;
             Marquee.Clear(this);
@@ -247,7 +284,8 @@ public sealed class KaraokeText : Grid
         // 每 50ms 重定目标的短动画形成平滑跟随
         if (_overflow > 10)
         {
-            var avail = ActualWidth - 4;
+            var viewportW = (Parent as FrameworkElement)?.ActualWidth ?? ActualWidth;
+            var avail = viewportW - 4;
             var target = Math.Clamp(boundary - avail * 0.35, 0, _overflow);
             ScrollFraction = target / _overflow;
             if (RenderTransform is not TranslateTransform tt)

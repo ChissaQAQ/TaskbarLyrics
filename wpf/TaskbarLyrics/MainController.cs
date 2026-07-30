@@ -285,9 +285,10 @@ public sealed class MainController : IDisposable
                     {
                         words = w;
                     }
-                    else if (_karaoke.Count > 0)
+                    else
                     {
-                        // 本行没匹配到逐字：按行时长合成匀速扫过，保证整首歌效果一致
+                        // 本行（或整首歌）没匹配到逐字：按行时长合成匀速进度，
+                        // 长歌词跟随它从头滚到尾（不做来回走马灯），扫过效果整首歌一致
                         var lineDur = index + 1 < lines.Count
                             ? Math.Clamp(lines[index + 1].Ms - lines[index].Ms, 800, 10000)
                             : 5000;

@@ -280,7 +280,8 @@ public partial class OverlayWindow : Window
         ArtistText.Visibility = artist.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
 
         var dpi = DpiScaleX();
-        var tw = KaraokeText.MeasureTextWidth(title, family, OrigFontDip, dpi);
+        var titleWeight = Cfg.FontBold ? FontWeights.SemiBold : FontWeights.Normal;
+        var tw = KaraokeText.MeasureTextWidth(title, family, OrigFontDip, dpi, titleWeight);
         var aw = artist.Length > 0 ? KaraokeText.MeasureTextWidth(artist, family, TransFontDip, dpi) : 0;
         _infoWidthDip = Math.Clamp(Math.Max(tw, aw) + (IsLeftAlign ? 16 : 28), 80, Cfg.Width);
         Dock();
@@ -407,7 +408,10 @@ public partial class OverlayWindow : Window
                 tb.Effect = new DropShadowEffect { Color = Colors.Black, BlurRadius = 3, ShadowDepth = 0, Opacity = 0.5 };
             var hasWords = words != null;
             tb.SizeChanged += (_, _) => UpdateTextScroll(tb, translation, transFamily, align, hasWords);
-            sp.Children.Add(tb);
+            // 译文也用无限宽测量容器包一层（同 KaraokeText，否则超宽译文排版阶段就被截断）
+            var transHost = new NaturalMeasureGrid();
+            transHost.Children.Add(tb);
+            sp.Children.Add(transHost);
         }
         return (sp, karaoke);
     }
