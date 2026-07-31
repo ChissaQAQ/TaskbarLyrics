@@ -51,9 +51,57 @@ public sealed class MainController : IDisposable
 
     private OverlayWindow Overlay => _overlay!;
 
+    /// <summary>还活着的覆盖层（重建间隙返回 null，调用方跳过本轮刷新）。</summary>
+    private OverlayWindow? Live => _overlay is { IsAlive: true } w ? w : null;
+
+    /// <summary>窗口意外消失时立刻排一次重建（不等 1.5s 周期兜底）。</summary>
+    private void HookOverlay(OverlayWindow w)
+    {
+        w.Closed += (_, _) =>
+        {
+            if (_quit) return; // 菜单退出走的也是 Close，别把自己救回来
+            // Closed 处理中窗口还在拆，重建推到下一个消息循环轮次
+            Application.Current?.Dispatcher.BeginInvoke(RebuildOverlay);
+        };
+    }
+
+    /// <summary>重建覆盖层窗口并挂回任务栏。
+    ///
+    /// 覆盖层是 Shell_TrayWnd 的子窗口，explorer 重启（崩溃自恢复、系统更新、
+    /// 手动重启资源管理器——都是常规事件）会销毁任务栏，我们的子窗口被连带销毁。
+    /// 托盘图标是 WinForms NotifyIcon，它自己处理 TaskbarCreated 广播能自愈；
+    /// WPF 窗口不能——而 TaskbarCreated 只发给顶层窗口，我们既收不到、
+    /// 收到时窗口也已经不存在了。所以自愈路径是「窗口没了 → 等任务栏就绪 → 重建」。
+    /// 配合 App.xaml 的 ShutdownMode=OnExplicitShutdown（否则窗口一关进程就退）。</summary>
+    private void RebuildOverlay()
+    {
+        if (_quit || Live != null) return; // 已经被上一条路径救回来了
+        // 任务栏还没起好（explorer 正在启动）：这轮不建，留给 1.5s 周期再试。
+        // 没有宿主可挂的窗口会以普通顶层窗形式闪在屏幕中间
+        if (Cfg.Mode == "taskbar" && NativeMethods.ResolveTaskbar(Cfg.Monitor).Tray == IntPtr.Zero)
+            return;
+
+        _overlay = new OverlayWindow(this);
+        HookOverlay(_overlay);
+        _overlay.Show();
+        _overlay.Dock();
+        _overlay.UpdateFullscreen();
+        _overlay.SetPlaying(_lastPlaying);
+        // 状态重新灌进新窗口：封面按字节引用去重，清掉记录让监听侧下一轮重新推送；
+        // _forceLine/_forceMedia 让下面这次节拍用当前歌词重建两层视觉
+        _coverSong = "";
+        _shownCoverBytes = null;
+        _shownOriginal = "";
+        _forceLine = true;
+        _forceMedia = true;
+        OnLyricsTick();
+    }
+
     public void Run()
     {
+        TaskbarFreeSpace.Start(); // 任务栏空档的 UIA 枚举跑在后台线程，UI 线程只读快照
         _overlay = new OverlayWindow(this);
+        HookOverlay(_overlay);
         _overlay.Show();
         _tray = new TrayIcon(this);
 
@@ -76,6 +124,13 @@ public sealed class MainController : IDisposable
         _dockTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1500) };
         _dockTimer.Tick += (_, _) =>
         {
+            // 覆盖层没了（explorer 重启把宿主任务栏连带我们的子窗口一起销毁）：
+            // 先把它造回来，本轮不做贴合
+            if (_overlay == null || !_overlay.IsAlive)
+            {
+                RebuildOverlay();
+                return;
+            }
             Overlay.Dock();
             Overlay.UpdateFullscreen();
         };
@@ -105,7 +160,7 @@ public sealed class MainController : IDisposable
             _coverSong = state.Key;
             _shownCoverBytes = null;
             if (!_quit)
-                Application.Current?.Dispatcher.BeginInvoke(() => Overlay.SetCover(null));
+                Application.Current?.Dispatcher.BeginInvoke(() => Live?.SetCover(null));
         }
         if (state.CoverBytes != null && !ReferenceEquals(state.CoverBytes, _shownCoverBytes))
         {
@@ -186,7 +241,7 @@ public sealed class MainController : IDisposable
         {
             cover = null;
         }
-        Overlay.SetCover(cover); // null 时显示音符占位，不再留空白
+        Live?.SetCover(cover); // null 时显示音符占位，不再留空白
     }
 
     /// <summary>缩放到 8x8 灰度图算 (标准差, 均值)（对应 PIL 的 ImageStat）。</summary>
@@ -209,6 +264,7 @@ public sealed class MainController : IDisposable
 
     private void OnLyricsTick()
     {
+        if (Live == null) return; // 窗口正在重建（explorer 重启），本轮没有可刷的界面
         var state = _state;
         if (state == null)
         {
@@ -400,7 +456,7 @@ public sealed class MainController : IDisposable
     /// <summary>设置窗口应用后：外观/布局即时生效；必要时重抓歌词。</summary>
     public void ApplySettings(bool refetchLyrics)
     {
-        if (_overlay == null) return; // 仅设置模式（--settings）：配置已保存，无界面可刷新
+        if (Live == null) return; // 仅设置模式（--settings）或窗口重建中：配置已保存，无界面可刷新
         if (refetchLyrics)
             _songKey = ""; // 强制重新抓歌词（第二行/逐字内容变化）
         Overlay.Dock();
@@ -442,8 +498,9 @@ public sealed class MainController : IDisposable
 
     public void Quit()
     {
-        _quit = true;
+        _quit = true; // 必须先置：Closed 处理里靠它区分「主动退出」与「被 explorer 干掉」
         _cts.Cancel();
+        TaskbarFreeSpace.Stop();
         _tray?.Dispose();
         _overlay?.Close();
         Application.Current.Shutdown();
@@ -455,6 +512,7 @@ public sealed class MainController : IDisposable
         _cts.Cancel();
         _lyricsTimer?.Stop();
         _dockTimer?.Stop();
+        TaskbarFreeSpace.Stop(); // 只置标志不 join：不能卡在一次可能挂住的 UIA 调用上
         _tray?.Dispose();
         _cts.Dispose();
     }

@@ -23,6 +23,7 @@ public partial class App : Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        InstallExceptionHandlers();
 
         // 接力替换模式（更新用）：TaskbarLyrics-new.exe --apply-update "<目标exe>" <旧pid>
         if (e.Args.Length >= 3 && e.Args[0] == "--apply-update")
@@ -61,6 +62,31 @@ public partial class App : Application
 
         _controller = new MainController();
         _controller.Run();
+    }
+
+    /// <summary>三处未捕获异常的兜底。
+    ///
+    /// 这是个常驻后台的覆盖层：偶发异常（任务栏句柄在两次调用之间失效、
+    /// SMTC/网络抖动、封面解码到坏字节）不该让整个程序消失。默认行为是
+    /// UI 线程一个未捕获异常直接终止进程，且不留任何线索——现象就是
+    /// 「跑着跑着程序自己没了」，跟 explorer 重启那条路径混在一起分不清。
+    /// 兜住后记日志继续跑：状态最多错一帧，下一个 50ms 节拍就重算回来。
+    /// AppDomain 那条只能记录（.NET 上非 UI 线程的未捕获异常无法阻止进程终止），
+    /// 但至少 error.log 里会留下调用栈。</summary>
+    private void InstallExceptionHandlers()
+    {
+        DispatcherUnhandledException += (_, args) =>
+        {
+            Log.Error("dispatcher", args.Exception);
+            args.Handled = true;
+        };
+        AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+            Log.Error("appdomain", args.ExceptionObject as Exception);
+        TaskScheduler.UnobservedTaskException += (_, args) =>
+        {
+            Log.Error("task", args.Exception);
+            args.SetObserved();
+        };
     }
 
     protected override void OnExit(ExitEventArgs e)

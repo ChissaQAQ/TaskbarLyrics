@@ -66,14 +66,29 @@ public partial class OverlayWindow : Window
     // WinEvent 前台钩子（切前台时即时重摆，不等 1.5s 周期）
     private NativeMethods.WinEventDelegate? _winEventProc;
     private IntPtr _winEventHook;
+    // 前台切换事件成串到达（旧窗失焦、新窗获焦、任务栏自身闪一下前台，各算一次），
+    // 逐个 BeginInvoke(Dock) 就是逐个跑完整重摆——UIA 时代这里能连累 UI 线程几百毫秒。
+    // 合并成尾沿触发：一串事件只排一次重摆，并等前台切换的布局抖动落定后再摆
+    private readonly System.Windows.Threading.DispatcherTimer _dockCoalesce =
+        new() { Interval = TimeSpan.FromMilliseconds(120) };
 
     private bool _dragging;
     private NativeMethods.POINT _dragCursor0;
     private int _dragWinX0, _dragWinY0;
     // 浮动模式上次摆放的位置尺寸：没变就不调 SetWindowPos（防分层窗重合成闪烁）
     private int _lastFloatX = int.MinValue, _lastFloatY, _lastFloatW, _lastFloatH;
+    // 任务栏模式同上：没变就只断言 z-order，不带 FRAMECHANGED 全量重摆
+    private IntPtr _lastTbTray;
+    private int _lastTbX, _lastTbW, _lastTbH;
 
     private AppConfig Cfg => _app.Cfg;
+
+    private bool _destroyed;
+
+    /// <summary>窗口是否还活着。宿主任务栏被销毁时我们的子窗口会被连带销毁，
+    /// 此时 Closed 已触发；再查一次 IsWindow 兜底那些不经 WPF 通知的销毁路径。</summary>
+    public bool IsAlive => !_destroyed
+        && (_hwnd == IntPtr.Zero || NativeMethods.IsWindow(_hwnd)); // 句柄未就绪算活（Show 前）
 
     /// <summary>原文字号（DIP，对应 Python pt_to_px）。</summary>
     private double OrigFontDip => Cfg.FontSize * 96.0 / 72.0;
@@ -91,7 +106,7 @@ public partial class OverlayWindow : Window
             Dock();
             // 前台切换即时重摆：任务栏 XAML 层在前台变化瞬间会盖住嵌入窗口，
             // 不等 1.5s 周期兜底，收到事件立刻重断言位置与 z-order
-            _winEventProc = (_, _, _, _, _, _, _) => Dispatcher.BeginInvoke(Dock);
+            _winEventProc = (_, _, _, _, _, _, _) => Dispatcher.BeginInvoke(QueueDock);
             _winEventHook = NativeMethods.SetWinEventHook(
                 NativeMethods.EVENT_SYSTEM_FOREGROUND, NativeMethods.EVENT_SYSTEM_FOREGROUND,
                 IntPtr.Zero, _winEventProc, 0, 0,
@@ -99,8 +114,11 @@ public partial class OverlayWindow : Window
         };
         Closed += (_, _) =>
         {
+            _destroyed = true;
             if (_winEventHook != IntPtr.Zero)
                 NativeMethods.UnhookWinEvent(_winEventHook);
+            _dockCoalesce.Stop();
+            _hoverPoll.Stop();
         };
         MouseLeftButtonDown += OnLeftDown;
         MouseMove += OnMouseMove;
@@ -108,8 +126,20 @@ public partial class OverlayWindow : Window
         MouseRightButtonUp += (_, _) => { if (!Cfg.Locked) _app.ShowContextMenu(); };
         // 内容区宽度变化（窗口宽随歌词长度/任务栏空档/悬停按钮列变化）即重算滚动距离
         LinesHost.SizeChanged += (_, _) => ApplyViewportWidth();
+        _dockCoalesce.Tick += (_, _) =>
+        {
+            _dockCoalesce.Stop();
+            Dock();
+        };
         _hoverPoll.Tick += (_, _) => PollHover();
         _hoverPoll.Start();
+    }
+
+    /// <summary>排一次合并后的重摆（已排队则忽略，一串前台事件只摆一次）。</summary>
+    private void QueueDock()
+    {
+        if (_dockCoalesce.IsEnabled) return;
+        _dockCoalesce.Start();
     }
 
     /// <summary>悬停轮询：光标在窗口矩形内即视为悬停（窗口整体检测）。
@@ -212,7 +242,7 @@ public partial class OverlayWindow : Window
                 sb.Completed += (_, _) =>
                 {
                     LinesHost.Children.Remove(oldRef);
-                    oldSb?.Stop(this);
+                    ReleaseKaraoke(oldSb);
                 };
                 sb.Begin(this);
             }
@@ -234,7 +264,7 @@ public partial class OverlayWindow : Window
                 sb.Completed += (_, _) =>
                 {
                     LinesHost.Children.Remove(oldRef);
-                    oldSb?.Stop(this); // 旧行的逐字动画随淡出结束停止
+                    ReleaseKaraoke(oldSb); // 旧行的逐字动画随淡出结束释放
                 };
                 sb.Begin(this);
             }
@@ -242,7 +272,7 @@ public partial class OverlayWindow : Window
         else
         {
             if (oldLine != null) LinesHost.Children.Remove(oldLine);
-            oldSb?.Stop(this);
+            ReleaseKaraoke(oldSb);
             LinesHost.Children.Clear();
             LinesHost.Children.Add(visual);
         }
@@ -384,6 +414,14 @@ public partial class OverlayWindow : Window
         Storyboard.SetTargetProperty(anim, path);
         sb.Children.Add(anim);
     }
+
+    /// <summary>释放一行的逐字动画。必须 Remove 而不是 Stop：
+    /// Begin(scope, isControllable: true) 创建的 clock 由 scope 对象（本窗口）持有，
+    /// 只有 Remove 才会解除持有——Stop 只是让它停下，clock 连同它引用的整棵行视觉树
+    /// （两层文本、阴影、画刷）永远不回收。实测每行泄漏约 8KB，一行歌词 3~5 秒，
+    /// 也就是每小时白吃 8MB 且只增不减，长时间运行后内存持续膨胀。
+    /// 逐字进度要 Seek/Pause/Resume，所以 isControllable 不能去掉，只能配对 Remove。</summary>
+    private void ReleaseKaraoke(Storyboard? sb) => sb?.Remove(this);
 
     private (NaturalMeasureStack Visual, KaraokeText Karaoke, TranslationText? Trans) BuildLineVisual(
         string original, string translation, IReadOnlyList<KaraokeWord>? words)
@@ -694,8 +732,24 @@ public partial class OverlayWindow : Window
                 x = rightEdge - 12 - widthPx;
             }
             x = Math.Clamp(x, 0, Math.Max(0, rc.Right - widthPx));
+            // 位置尺寸没变时只断言 z-order：Dock 每 1.5s 跑一次、前台切换还会额外触发，
+            // 每次都带 SWP_FRAMECHANGED 全量重摆等于让 explorer 反复重算子窗口边框、
+            // 重合成任务栏那一条——白烧 CPU，任务栏繁忙时还会排在它的消息队列里等。
+            // 缓存值要跟窗口的真实矩形对一遍：否则万一有别的东西挪动了我们，
+            // 缓存会把错位状态永久锁死（缓存只是省调用，不是位置的唯一真相）。
             // 不带 SWP_NOZORDER：断言为任务栏子窗口最顶层，
             // 任务栏内部重排（如悬停图标弹出预览）后仍保持可见
+            NativeMethods.GetWindowRect(_hwnd, out var curRc);
+            NativeMethods.GetWindowRect(tray, out var trayRc);
+            if (tray == _lastTbTray && x == _lastTbX && widthPx == _lastTbW && heightPx == _lastTbH
+                && curRc.Left - trayRc.Left == x
+                && curRc.Width == widthPx && curRc.Height == heightPx)
+            {
+                NativeMethods.SetWindowPos(_hwnd, IntPtr.Zero, 0, 0, 0, 0,
+                    NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE);
+                return;
+            }
+            (_lastTbTray, _lastTbX, _lastTbW, _lastTbH) = (tray, x, widthPx, heightPx);
             NativeMethods.SetWindowPos(_hwnd, IntPtr.Zero, x, 0, widthPx, heightPx,
                 NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_FRAMECHANGED);
         }
@@ -703,6 +757,7 @@ public partial class OverlayWindow : Window
         {
             NativeMethods.MakePopup(_hwnd, topmost: true);
             Topmost = true;
+            _lastTbTray = IntPtr.Zero; // 模式切回任务栏时强制重新摆放
             int x, y;
             // 居中对齐的中心锚点迁移（同任务栏 custom）：旧 float_x 左缘折算为中心点
             if (CenterAnchored && !Cfg.FloatCx.HasValue && Cfg.FloatX.HasValue)

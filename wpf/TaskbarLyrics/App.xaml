@@ -1,7 +1,13 @@
 <Application x:Class="TaskbarLyrics.App"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             ShutdownMode="OnExplicitShutdown"
              ThemeMode="System">
+    <!-- ShutdownMode=OnExplicitShutdown：只有菜单里的「退出」（MainController.Quit）
+         才能结束进程。默认的 OnLastWindowClose 在这里是致命的——覆盖窗口是
+         Shell_TrayWnd 的子窗口，explorer 重启会把它连带销毁，作为唯一 WPF 窗口
+         一关就把整个进程带走（「跑久了程序自己没了」的根因）。
+         各命令行分支（apply-update / lyrics-test / settings）都显式 Shutdown(0) -->
     <!-- ThemeMode=System：启用 .NET 内置 Fluent 主题（Win11 风格）并跟随系统明暗，
          主要作用于设置窗口；歌词覆盖窗口的控件均为自定义模板且显式指定画刷，不受影响 -->
 </Application>
