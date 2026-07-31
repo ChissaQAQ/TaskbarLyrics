@@ -1,5 +1,0 @@
-winsdk
-requests
-pystray
-pillow
-pyinstaller

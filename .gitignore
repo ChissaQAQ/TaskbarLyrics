@@ -1,8 +1,3 @@
-.venv/
-__pycache__/
-*.pyc
-build/
-dist/
 wpf/publish/
 wpf/TaskbarLyrics/bin/
 wpf/TaskbarLyrics/obj/
