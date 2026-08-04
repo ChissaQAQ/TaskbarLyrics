@@ -1,4 +1,7 @@
+# 发布产物（单文件 exe 约 25MB，只作为 release 资产上传，不进仓库）。
+# 两条都要留：历史上输出过 wpf/publish/，现在 dotnet publish 落在项目目录下
 wpf/publish/
+wpf/TaskbarLyrics/publish/
 wpf/TaskbarLyrics/bin/
 wpf/TaskbarLyrics/obj/
 config.json

@@ -3,31 +3,16 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="任务栏歌词 - 设置" Width="820" Height="660" MinWidth="720" MinHeight="540"
         WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip"
-        Background="{DynamicResource WindowTintBrush}"
+        Background="{DynamicResource SolidBackgroundFillColorBaseBrush}"
         Topmost="True">
     <!-- Win11 设置风格：左侧导航 + 卡片式分组；行 = 标题+说明（左）/ 控件（右）。
          多选项统一用下拉框（不会再横向溢出），布尔项用开关（ToggleSwitch）。
-         背景/控件样式交给 App.xaml 的 Fluent 主题（跟随系统明暗）；
-         卡片/分隔线用「文字色 + 低透明度」的自适应画刷，明暗主题都成立。 -->
+         背景/控件样式交给 App.xaml 的 Fluent 主题（跟随系统明暗）。 -->
     <Window.Resources>
-        <!-- 窗口底色微灰（亮）/ 微亮（暗），卡片用主题窗口色 → 明暗主题下卡片都清晰分层 -->
-        <SolidColorBrush x:Key="WindowTintBrush" Opacity="0.035"
-                         Color="{DynamicResource {x:Static SystemColors.ControlTextColorKey}}"/>
-        <SolidColorBrush x:Key="CardBorderBrush" Opacity="0.18"
-                         Color="{DynamicResource {x:Static SystemColors.ControlTextColorKey}}"/>
-        <SolidColorBrush x:Key="SeparatorBrush" Opacity="0.14"
-                         Color="{DynamicResource {x:Static SystemColors.ControlTextColorKey}}"/>
-        <!-- 下拉框/列表项用的低透明自适应画刷 -->
-        <SolidColorBrush x:Key="ComboBorderBrush" Opacity="0.20"
-                         Color="{DynamicResource {x:Static SystemColors.ControlTextColorKey}}"/>
-        <SolidColorBrush x:Key="ComboHoverBrush" Opacity="0.05"
-                         Color="{DynamicResource {x:Static SystemColors.ControlTextColorKey}}"/>
-        <SolidColorBrush x:Key="ItemHoverBrush" Opacity="0.06"
-                         Color="{DynamicResource {x:Static SystemColors.ControlTextColorKey}}"/>
-        <SolidColorBrush x:Key="NavHoverBrush" Opacity="0.05"
-                         Color="{DynamicResource {x:Static SystemColors.ControlTextColorKey}}"/>
-        <SolidColorBrush x:Key="NavSelectedBrush" Opacity="0.08"
-                         Color="{DynamicResource {x:Static SystemColors.ControlTextColorKey}}"/>
+        <!-- 配色一律取 Fluent 主题自带的自适应资源（TextFillColor* / *FillColor* / *StrokeColor*），
+             它们随 ThemeMode 明暗切换。这里绝不能用 SystemColors.*：那是 Win32 经典系统色，
+             实测在 Light/Dark 下取值完全相同（WindowBrush 恒白、ControlTextBrush 恒黑、
+             GrayTextBrush 恒灰），跟 Fluent 的明暗一混用就会出现白字白底、深字深底。 -->
 
         <!-- Win11 式下拉项：圆角药丸悬停 + 选中对勾（而非左侧竖条） -->
         <Style TargetType="ComboBoxItem">
@@ -40,13 +25,13 @@
                             <Grid MinHeight="28">
                                 <TextBlock x:Name="Check" Text="&#xE73E;" FontFamily="Segoe MDL2 Assets"
                                            FontSize="11" VerticalAlignment="Center" Visibility="Collapsed"
-                                           Foreground="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+                                           Foreground="{DynamicResource AccentFillColorDefaultBrush}"/>
                                 <ContentPresenter Margin="22,0,0,0" VerticalAlignment="Center"/>
                             </Grid>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="ItemBg" Property="Background" Value="{StaticResource ItemHoverBrush}"/>
+                                <Setter TargetName="ItemBg" Property="Background" Value="{DynamicResource SubtleFillColorTertiaryBrush}"/>
                             </Trigger>
                             <Trigger Property="IsSelected" Value="True">
                                 <Setter TargetName="Check" Property="Visibility" Value="Visible"/>
@@ -72,8 +57,8 @@
                                 <ToggleButton.Template>
                                     <ControlTemplate TargetType="ToggleButton">
                                         <Border x:Name="Chrome" CornerRadius="4" BorderThickness="1"
-                                                Background="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"
-                                                BorderBrush="{StaticResource ComboBorderBrush}">
+                                                Background="{DynamicResource ControlFillColorDefaultBrush}"
+                                                BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}">
                                             <Grid>
                                                 <Grid.ColumnDefinitions>
                                                     <ColumnDefinition Width="*"/>
@@ -82,13 +67,13 @@
                                                 <TextBlock Grid.Column="1" Text="&#xE70D;"
                                                            FontFamily="Segoe MDL2 Assets" FontSize="12"
                                                            HorizontalAlignment="Center" VerticalAlignment="Center"
-                                                           Foreground="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
+                                                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
                                             </Grid>
                                         </Border>
                                         <ControlTemplate.Triggers>
                                             <Trigger Property="IsMouseOver" Value="True">
                                                 <Setter TargetName="Chrome" Property="Background"
-                                                        Value="{StaticResource ComboHoverBrush}"/>
+                                                        Value="{DynamicResource SubtleFillColorTertiaryBrush}"/>
                                             </Trigger>
                                             <Trigger Property="IsEnabled" Value="False">
                                                 <Setter TargetName="Chrome" Property="Opacity" Value="0.5"/>
@@ -103,19 +88,19 @@
                                               ContentStringFormat="{TemplateBinding SelectionBoxItemStringFormat}"
                                               Margin="11,0,30,0" VerticalAlignment="Center"
                                               IsHitTestVisible="False"
-                                              TextElement.Foreground="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}"/>
+                                              TextElement.Foreground="{DynamicResource TextFillColorPrimaryBrush}"/>
                             <TextBox x:Name="PART_EditableTextBox" Style="{x:Null}"
                                      Background="Transparent" BorderThickness="0"
                                      Margin="0,0,30,0" Padding="11,0,0,0" VerticalContentAlignment="Center"
                                      HorizontalAlignment="Stretch" Visibility="Collapsed"
-                                     Foreground="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}"
-                                     CaretBrush="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}"/>
+                                     Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                                     CaretBrush="{DynamicResource TextFillColorPrimaryBrush}"/>
                             <Popup x:Name="PART_Popup" Placement="Bottom"
                                    IsOpen="{TemplateBinding IsDropDownOpen}"
                                    AllowsTransparency="True" PopupAnimation="Fade" VerticalOffset="4">
                                 <Border CornerRadius="8" Padding="5,4"
-                                        Background="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"
-                                        BorderBrush="{StaticResource ComboBorderBrush}" BorderThickness="1"
+                                        Background="{DynamicResource ControlSolidFillColorDefaultBrush}"
+                                        BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1"
                                         MinWidth="{TemplateBinding ActualWidth}" MaxHeight="300"
                                         SnapsToDevicePixels="True" UseLayoutRounding="True">
                                     <Border.Effect>
@@ -151,17 +136,17 @@
                             <Grid>
                                 <Border x:Name="Pill" Width="3" Height="18" CornerRadius="1.5"
                                         HorizontalAlignment="Left" VerticalAlignment="Center" Margin="4,0,0,0"
-                                        Background="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"
+                                        Background="{DynamicResource AccentFillColorDefaultBrush}"
                                         Visibility="Collapsed"/>
                                 <ContentPresenter Margin="10,7"/>
                             </Grid>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Bg" Property="Background" Value="{StaticResource NavHoverBrush}"/>
+                                <Setter TargetName="Bg" Property="Background" Value="{DynamicResource SubtleFillColorTertiaryBrush}"/>
                             </Trigger>
                             <Trigger Property="IsSelected" Value="True">
-                                <Setter TargetName="Bg" Property="Background" Value="{StaticResource NavSelectedBrush}"/>
+                                <Setter TargetName="Bg" Property="Background" Value="{DynamicResource SubtleFillColorSecondaryBrush}"/>
                                 <Setter TargetName="Pill" Property="Visibility" Value="Visible"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
@@ -207,10 +192,10 @@
                             </VisualStateManager.VisualStateGroups>
                             <Border x:Name="Track" CornerRadius="11" BorderThickness="1"
                                     Background="Transparent"
-                                    BorderBrush="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}">
+                                    BorderBrush="{DynamicResource TextFillColorSecondaryBrush}">
                                 <Ellipse x:Name="Knob" Width="12" Height="12" Margin="4,0,0,0"
                                          HorizontalAlignment="Left" VerticalAlignment="Center"
-                                         Fill="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}">
+                                         Fill="{DynamicResource TextFillColorPrimaryBrush}">
                                     <Ellipse.RenderTransform>
                                         <TranslateTransform x:Name="KnobX" X="0"/>
                                     </Ellipse.RenderTransform>
@@ -220,9 +205,9 @@
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsChecked" Value="True">
                                 <Setter TargetName="Track" Property="Background"
-                                        Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+                                        Value="{DynamicResource AccentFillColorDefaultBrush}"/>
                                 <Setter TargetName="Track" Property="BorderBrush"
-                                        Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+                                        Value="{DynamicResource AccentFillColorDefaultBrush}"/>
                                 <Setter TargetName="Knob" Property="Fill" Value="White"/>
                             </Trigger>
                             <Trigger Property="IsMouseOver" Value="True">
@@ -240,32 +225,35 @@
             <Setter Property="Padding" Value="16,4"/>
             <Setter Property="Margin" Value="0,0,0,14"/>
             <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}"/>
-            <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource ControlStrokeColorDefaultBrush}"/>
+            <Setter Property="Background" Value="{DynamicResource CardBackgroundFillColorDefaultBrush}"/>
         </Style>
         <!-- 设置行：左标题+说明，右控件 -->
         <Style x:Key="Row" TargetType="Grid">
             <Setter Property="Margin" Value="0,9"/>
         </Style>
         <Style x:Key="RowTitle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}"/>
             <Setter Property="FontSize" Value="13"/>
         </Style>
         <Style x:Key="RowDesc" TargetType="TextBlock">
             <Setter Property="FontSize" Value="12"/>
             <Setter Property="TextWrapping" Value="Wrap"/>
             <Setter Property="Margin" Value="0,3,0,0"/>
-            <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}"/>
         </Style>
         <Style x:Key="RowSeparator" TargetType="Border">
             <Setter Property="Height" Value="1"/>
-            <Setter Property="Background" Value="{StaticResource SeparatorBrush}"/>
+            <Setter Property="Background" Value="{DynamicResource DividerStrokeColorDefaultBrush}"/>
         </Style>
         <Style x:Key="CardHeader" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}"/>
             <Setter Property="FontSize" Value="13"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="Margin" Value="4,0,0,6"/>
         </Style>
         <Style x:Key="PageHeader" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}"/>
             <Setter Property="FontSize" Value="24"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="Margin" Value="0,2,0,16"/>
@@ -298,9 +286,10 @@
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
                     <StackPanel Margin="10,10,10,14">
-                        <TextBlock Text="任务栏歌词" FontSize="16" FontWeight="SemiBold"/>
+                        <TextBlock Text="任务栏歌词" FontSize="16" FontWeight="SemiBold"
+                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}"/>
                         <TextBlock Text="设置" FontSize="12" Margin="0,2,0,0"
-                                   Foreground="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
                     </StackPanel>
                     <ListBox x:Name="NavList" Grid.Row="1" Background="Transparent" BorderThickness="0"
                              ScrollViewer.HorizontalScrollBarVisibility="Disabled"
@@ -310,15 +299,17 @@
                             <DataTemplate>
                                 <StackPanel Orientation="Horizontal">
                                     <TextBlock Text="{Binding Glyph}" FontFamily="Segoe MDL2 Assets"
-                                               FontSize="14" Width="26" VerticalAlignment="Center"/>
-                                    <TextBlock Text="{Binding Name}" FontSize="13" VerticalAlignment="Center"/>
+                                               FontSize="14" Width="26" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource TextFillColorPrimaryBrush}"/>
+                                    <TextBlock Text="{Binding Name}" FontSize="13" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource TextFillColorPrimaryBrush}"/>
                                 </StackPanel>
                             </DataTemplate>
                         </ListBox.ItemTemplate>
                     </ListBox>
                 </Grid>
             </Border>
-            <Border Grid.Column="1" Width="1" Background="{StaticResource SeparatorBrush}"/>
+            <Border Grid.Column="1" Width="1" Background="{DynamicResource DividerStrokeColorDefaultBrush}"/>
 
             <!-- 内容页 -->
             <ScrollViewer x:Name="PageScroller" Grid.Column="2" VerticalScrollBarVisibility="Auto"
@@ -448,7 +439,7 @@
                                         <TextBlock Style="{StaticResource RowTitle}" Text="当前版本"/>
                                     </StackPanel>
                                     <TextBlock x:Name="VersionText" Grid.Column="1" VerticalAlignment="Center"
-                                               Foreground="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
+                                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
                                 </Grid>
                                 <Border Style="{StaticResource RowSeparator}"/>
                                 <Grid Style="{StaticResource Row}">
@@ -625,7 +616,7 @@
                                                 VerticalAlignment="Center">
                                         <TextBox x:Name="TextColorBox" Width="76" TextChanged="ColorBox_TextChanged"/>
                                         <Border x:Name="TextColorSwatch" Width="24" Height="18" Margin="8,0,0,0"
-                                                BorderBrush="{StaticResource CardBorderBrush}" BorderThickness="1"
+                                                BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1"
                                                 CornerRadius="4" VerticalAlignment="Center"/>
                                     </StackPanel>
                                 </Grid>
@@ -642,7 +633,7 @@
                                                 VerticalAlignment="Center">
                                         <TextBox x:Name="TransColorBox" Width="76" TextChanged="ColorBox_TextChanged"/>
                                         <Border x:Name="TransColorSwatch" Width="24" Height="18" Margin="8,0,0,0"
-                                                BorderBrush="{StaticResource CardBorderBrush}" BorderThickness="1"
+                                                BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1"
                                                 CornerRadius="4" VerticalAlignment="Center"/>
                                     </StackPanel>
                                 </Grid>
@@ -707,17 +698,100 @@
                             </StackPanel>
                         </Border>
                     </StackPanel>
+
+                    <!-- 关于 -->
+                    <StackPanel x:Name="PageAbout" Visibility="Collapsed">
+                        <TextBlock Style="{StaticResource PageHeader}" Text="关于"/>
+                        <Border Style="{StaticResource Card}">
+                            <Grid Margin="16,18">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <!-- 徽标用 MDL2 字形而非位图：矢量、跟随主题明暗，也不必把 ico 打进资源 -->
+                                <Border Width="52" Height="52" CornerRadius="10" VerticalAlignment="Top"
+                                        Background="{DynamicResource AccentFillColorDefaultBrush}">
+                                    <TextBlock Text="&#xE189;" FontFamily="Segoe MDL2 Assets" FontSize="26"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource TextOnAccentFillColorPrimaryBrush}"/>
+                                </Border>
+                                <StackPanel Grid.Column="1" Margin="16,0,0,0" VerticalAlignment="Center">
+                                    <TextBlock Text="任务栏歌词" FontSize="18" FontWeight="SemiBold"
+                                               Foreground="{DynamicResource TextFillColorPrimaryBrush}"/>
+                                    <TextBlock x:Name="AboutVersionText" FontSize="12" Margin="0,3,0,0"
+                                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                                    <TextBlock Style="{StaticResource RowDesc}" Margin="0,8,0,0"
+                                               Text="把正在播放的歌词嵌进 Windows 任务栏的空白处，随可用空间伸缩、不与图标托盘重叠；也可切换为独立置顶浮窗。"/>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+
+                        <TextBlock Style="{StaticResource CardHeader}" Text="链接"/>
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <Grid Style="{StaticResource Row}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                                        <TextBlock Style="{StaticResource RowTitle}" Text="项目主页"/>
+                                        <TextBlock Style="{StaticResource RowDesc}"
+                                                   Text="github.com/ChissaQAQ/TaskbarLyrics"/>
+                                    </StackPanel>
+                                    <Button Grid.Column="1" Content="打开" Padding="12,5" VerticalAlignment="Center"
+                                            Tag="https://github.com/ChissaQAQ/TaskbarLyrics" Click="Link_Click"/>
+                                </Grid>
+                                <Border Style="{StaticResource RowSeparator}"/>
+                                <Grid Style="{StaticResource Row}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                                        <TextBlock Style="{StaticResource RowTitle}" Text="反馈问题"/>
+                                        <TextBlock Style="{StaticResource RowDesc}"
+                                                   Text="歌词抓错、显示异常、崩溃日志都可以提 Issue"/>
+                                    </StackPanel>
+                                    <Button Grid.Column="1" Content="打开" Padding="12,5" VerticalAlignment="Center"
+                                            Tag="https://github.com/ChissaQAQ/TaskbarLyrics/issues" Click="Link_Click"/>
+                                </Grid>
+                                <Border Style="{StaticResource RowSeparator}"/>
+                                <Grid Style="{StaticResource Row}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                                        <TextBlock Style="{StaticResource RowTitle}" Text="日志目录"/>
+                                        <TextBlock Style="{StaticResource RowDesc}"
+                                                   Text="异常会记到程序目录的 error.log，反馈时附上更好定位"/>
+                                    </StackPanel>
+                                    <Button x:Name="OpenLogDirButton" Grid.Column="1" Content="打开" Padding="12,5"
+                                            VerticalAlignment="Center" Click="OpenLogDir_Click"/>
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+
+                        <TextBlock Style="{StaticResource CardHeader}" Text="说明"/>
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel Margin="16,14" >
+                                <TextBlock Style="{StaticResource RowDesc}" TextWrapping="Wrap"
+                                           Text="播放信息（歌名、歌手、进度）取自 Windows 自带的媒体传输控件（SMTC），因此理论上支持所有向系统上报播放状态的播放器，无需为某个客户端做适配。"/>
+                                <TextBlock Style="{StaticResource RowDesc}" Margin="0,10,0,0" TextWrapping="Wrap"
+                                           Text="歌词依次向网易云音乐、QQ 音乐、LRCLIB 查询，取第一个匹配上歌名与歌手的结果；译文与罗马音只有网易云提供，逐字歌词来自酷狗。歌词均为各平台用户上传，个别歌曲曲库里本身就没有或对不上时间轴，属于数据本身的上限。"/>
+                                <TextBlock Style="{StaticResource RowDesc}" Margin="0,10,0,0" TextWrapping="Wrap"
+                                           Text="「检查更新」连的是内网 Gitea 仓库，不在内网时会失败，此时请到上面的 GitHub Releases 页手动下载新版覆盖。"/>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
                 </StackPanel>
             </ScrollViewer>
         </Grid>
 
         <!-- 底部按钮栏 -->
-        <Border Grid.Row="1" BorderThickness="0,1,0,0" BorderBrush="{StaticResource SeparatorBrush}"
+        <Border Grid.Row="1" BorderThickness="0,1,0,0" BorderBrush="{DynamicResource DividerStrokeColorDefaultBrush}"
                 Padding="20,12">
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button Content="确定" Width="88" Margin="8,0,0,0" Click="Ok_Click" IsDefault="True"
-                        Background="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"
-                        Foreground="White"
+                        Background="{DynamicResource AccentFillColorDefaultBrush}"
+                        Foreground="{DynamicResource TextOnAccentFillColorPrimaryBrush}"
                         BorderThickness="0"/>
                 <Button Content="应用" Width="88" Margin="8,0,0,0" Click="Apply_Click"/>
                 <Button Content="取消" Width="88" Margin="8,0,0,0" Click="Cancel_Click" IsCancel="True"/>

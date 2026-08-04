@@ -149,7 +149,7 @@ public static partial class Lyrics
         var all = songs.EnumerateArray().ToList();
         // 歌名必须匹配（必要条件），歌手匹配与时长接近只是排序权重——
         // 只按歌手+时长挑会把同歌手、时长接近的别的歌抓来（主人反馈偶尔匹配错歌）
-        var ordered = all
+        var scored = all
             .Select(s => (Song: s,
                           Ts: TitleScore(s.TryGetProperty("name", out var nv) ? nv.GetString() ?? "" : "", title),
                           Artist: ArtistMatch(s, artist),
@@ -161,6 +161,8 @@ public static partial class Lyrics
             .OrderByDescending(x => x.Ts)
             .ThenByDescending(x => x.Artist)
             .ThenBy(x => x.DurDiff)
+            .ToList();
+        var ordered = PreferArtistMatched(scored, x => x.Artist)
             .Select(x => x.Song)
             .ToList();
         // 候选逐个尝试：同一首歌常有多个版本，
@@ -184,16 +186,29 @@ public static partial class Lyrics
             {
                 var root = lyric.RootElement;
                 var lines = ParseLrc(GetLyricText(root, "lrc"));
-                if (lines.Count == 0) continue;
+                // 有的条目只上传了译文或罗马音，原文 lrc 是空的（May'n「春夢」就是这样：
+                // 955 字带时间轴的歌词全在 tlyric 里，lrc 一个字都没有）。
+                // 直接跳过这条候选就会退化去抓同名的另一首歌，不如把现成的第二语言当主歌词用
+                var altAsMain = false;
+                if (lines.Count == 0)
+                {
+                    lines = ParseLrc(GetLyricText(root, "tlyric"));
+                    if (lines.Count == 0) lines = ParseLrc(GetLyricText(root, "romalrc"));
+                    if (lines.Count == 0) continue;
+                    altAsMain = true;
+                }
                 // 歌词总长远超歌曲时长 → 多半是抓错了歌（同名歌/不同版本），换下一个候选
                 if (durationS > 0 && lines[^1].Ms / 1000.0 > durationS + 30) continue;
-                // 第二行：译文（tlyric）或罗马音（romalrc）
-                var trans = secondLine switch
-                {
-                    "translation" => ParseLrc(GetLyricText(root, "tlyric")),
-                    "romaji" => ParseLrc(GetLyricText(root, "romalrc")),
-                    _ => new List<(int, string)>(),
-                };
+                // 第二行：译文（tlyric）或罗马音（romalrc）。
+                // 主歌词本身就是译文/罗马音时不再挂第二行，否则整行重复一遍
+                var trans = altAsMain
+                    ? new List<(int Ms, string Text)>()
+                    : secondLine switch
+                    {
+                        "translation" => ParseLrc(GetLyricText(root, "tlyric")),
+                        "romaji" => ParseLrc(GetLyricText(root, "romalrc")),
+                        _ => new List<(int, string)>(),
+                    };
                 var merged = MergeTranslation(lines, trans);
                 firstResult ??= merged;
                 if (secondLine != "translation" || merged.Any(l => l.Trans != null))
@@ -240,7 +255,8 @@ public static partial class Lyrics
         var ordered = songs
             .Select(s => (Song: s,
                           Ts: TitleScore(s.TryGetProperty("songname", out var nv) ? nv.GetString() ?? "" : "", title),
-                          Artist: artist.Length > 0 && SingerNames(s).Contains(artist),
+                          Artist: artist.Length > 0
+                              && SingerNames(s).Contains(artist, StringComparison.OrdinalIgnoreCase),
                           DurDiff: durationS > 0 ? Math.Abs(IntervalOf(s) - durationS) : 0.0))
             .Where(x => x.Ts > 0)
             .Where(x => durationS <= 0 || x.DurDiff <= 20)
@@ -249,7 +265,7 @@ public static partial class Lyrics
             .ThenBy(x => x.DurDiff)
             .ToList();
         if (ordered.Count == 0) return null;
-        var chosen = ordered[0].Song;
+        var chosen = PreferArtistMatched(ordered, x => x.Artist)[0].Song;
 
         var text = await GetStringAsync(
             "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?" + Q(new()
@@ -354,7 +370,8 @@ public static partial class Lyrics
             var sn = s.TryGetProperty("singername", out var n) ? n.GetString() ?? "" : "";
             // singername 为空时不能放行（空串是任何串的子串，恒真会误匹配）
             return artist.Length > 0 && sn.Length > 0
-                && (artist.Contains(sn) || sn.Contains(artist));
+                && (artist.Contains(sn, StringComparison.OrdinalIgnoreCase)
+                    || sn.Contains(artist, StringComparison.OrdinalIgnoreCase));
         }
         var ordered = songs
             .Select(s => (Song: s,
@@ -369,7 +386,7 @@ public static partial class Lyrics
             .ThenBy(x => x.DurDiff)
             .ToList();
         if (ordered.Count == 0) return null;
-        var chosen = ordered[0].Song;
+        var chosen = PreferArtistMatched(ordered, x => x.Artist)[0].Song;
 
         var songname = chosen.TryGetProperty("songname", out var snv) ? snv.GetString() ?? title : title;
         var chosenDur = chosen.TryGetProperty("duration", out var cd) ? cd.GetDouble() : durationS;
@@ -409,6 +426,15 @@ public static partial class Lyrics
         if (a == b) return 2;
         return a.Contains(b) || b.Contains(a) ? 1 : 0;
     }
+
+    /// <summary>候选池收敛：只要有一个候选的歌手对得上，就只在这些候选里挑。
+    ///
+    /// 歌名相同而歌手不符，基本就是同名的另一首歌——网易云上叫「春夢」的条目有四首，
+    /// 分属 May'n / 倒车入库 / 中川孝 / 初音ミク，拿错的那首冒充比不显示歌词更糟。
+    /// 光靠排序不够：排前面的候选可能因为没歌词被跳过，兜底就落到歌手不符的那首上。
+    /// 一个都对不上时（SMTC 的歌手写法与曲库不一致）才放开，按歌名分数照原顺序试。</summary>
+    private static List<T> PreferArtistMatched<T>(List<T> scored, Func<T, bool> artistMatched)
+        => scored.Any(artistMatched) ? scored.Where(artistMatched).ToList() : scored;
 
     /// <summary>匹配用归一化：全角转半角、小写化，只留字母和数字（忽略空白与标点差异）。</summary>
     private static string NormalizeForMatch(string s)

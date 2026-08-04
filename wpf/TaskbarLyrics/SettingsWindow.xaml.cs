@@ -1,5 +1,7 @@
 // 统一设置窗口（Win11 风格：左侧导航 + 卡片分组；多选项下拉框、布尔项开关）。
 // 从歌词条右键菜单或托盘菜单的「打开设置…」进入；确定/应用后写配置并实时生效。
+using System.Diagnostics;
+using System.IO;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
@@ -23,12 +25,14 @@ public partial class SettingsWindow : Window
             new NavItem("\uE713", "通用"),
             new NavItem("\uE189", "歌词"),
             new NavItem("\uE771", "外观"),
+            new NavItem("\uE946", "关于"),
         };
-        NavList.SelectedIndex = Math.Clamp(page, 0, 2);
+        NavList.SelectedIndex = Math.Clamp(page, 0, 3);
         LoadValues();
     }
 
-    /// <summary>Win11 22H2+ 启用 Mica 背景材质（不支持时保留 XAML 里的微灰底色）。</summary>
+    /// <summary>Win11 22H2+ 启用 Mica 背景材质；不支持时（如 Win10）保留 XAML 里的
+    /// 不透明主题底色——那里绝不能填半透明色，没有 Mica 兜底会露出不可控的底。</summary>
     protected override void OnSourceInitialized(EventArgs e)
     {
         base.OnSourceInitialized(e);
@@ -39,11 +43,32 @@ public partial class SettingsWindow : Window
 
     private AppConfig Cfg => _app.Cfg;
 
+    /// <summary>打开「关于」页里的外链。UseShellExecute 必须为 true：
+    /// 默认 false 时 http(s) 地址会被当作可执行文件路径而抛异常。</summary>
+    private void Link_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: string url }) OpenExternal(url);
+    }
+
+    private void OpenLogDir_Click(object sender, RoutedEventArgs e)
+    {
+        var dir = Path.GetDirectoryName(Environment.ProcessPath);
+        if (!string.IsNullOrEmpty(dir)) OpenExternal(dir);
+    }
+
+    /// <summary>打不开就只记日志：这是个纯附带的便利入口，不值得弹窗打断。</summary>
+    private static void OpenExternal(string target)
+    {
+        try { Process.Start(new ProcessStartInfo(target) { UseShellExecute = true }); }
+        catch (Exception ex) { Log.Error("openexternal", ex); }
+    }
+
     private void NavList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         PageGeneral.Visibility = NavList.SelectedIndex == 0 ? Visibility.Visible : Visibility.Collapsed;
         PageLyrics.Visibility = NavList.SelectedIndex == 1 ? Visibility.Visible : Visibility.Collapsed;
         PageAppearance.Visibility = NavList.SelectedIndex == 2 ? Visibility.Visible : Visibility.Collapsed;
+        PageAbout.Visibility = NavList.SelectedIndex == 3 ? Visibility.Visible : Visibility.Collapsed;
         PageScroller.ScrollToTop();
     }
 
@@ -67,6 +92,7 @@ public partial class SettingsWindow : Window
         LockedSwitch.IsChecked = cfg.Locked;
         AutostartSwitch.IsChecked = Autostart.IsEnabled();
         VersionText.Text = $"v{Updater.CurrentVersion}";
+        AboutVersionText.Text = $"版本 {Updater.CurrentVersion}";
         UpdateCheckSwitch.IsChecked = cfg.UpdateCheck;
         RefreshUpdateUi();
 
