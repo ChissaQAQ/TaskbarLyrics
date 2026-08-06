@@ -776,7 +776,7 @@
                                 <TextBlock Style="{StaticResource RowDesc}" Margin="0,10,0,0" TextWrapping="Wrap"
                                            Text="歌词依次向网易云音乐、QQ 音乐、LRCLIB 查询，取第一个匹配上歌名与歌手的结果；译文与罗马音只有网易云提供，逐字歌词来自酷狗。歌词均为各平台用户上传，个别歌曲曲库里本身就没有或对不上时间轴，属于数据本身的上限。"/>
                                 <TextBlock Style="{StaticResource RowDesc}" Margin="0,10,0,0" TextWrapping="Wrap"
-                                           Text="「检查更新」连的是内网 Gitea 仓库，不在内网时会失败，此时请到上面的 GitHub Releases 页手动下载新版覆盖。"/>
+                                           Text="「检查更新」查询 GitHub Releases 上的最新版本，发现新版后可一键下载并自动替换重启，配置与歌词缓存都会保留。"/>
                             </StackPanel>
                         </Border>
                     </StackPanel>
