@@ -3,8 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="任务栏歌词 - 设置" Width="820" Height="660" MinWidth="720" MinHeight="540"
         WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip"
-        Background="{DynamicResource SolidBackgroundFillColorBaseBrush}"
-        Topmost="True">
+        Background="{DynamicResource SolidBackgroundFillColorBaseBrush}">
     <!-- Win11 设置风格：左侧导航 + 卡片式分组；行 = 标题+说明（左）/ 控件（右）。
          多选项统一用下拉框（不会再横向溢出），布尔项用开关（ToggleSwitch）。
          背景/控件样式交给 App.xaml 的 Fluent 主题（跟随系统明暗）。 -->
@@ -509,7 +508,7 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
                                         <TextBlock Style="{StaticResource RowTitle}" Text="歌词偏移"/>
-                                        <TextBlock Style="{StaticResource RowDesc}" Text="单位秒，-3 ~ 3，提前为负"/>
+                                        <TextBlock Style="{StaticResource RowDesc}" Text="单位秒，-3 ~ 3，歌词比人声慢就调大"/>
                                     </StackPanel>
                                     <TextBox x:Name="OffsetBox" Grid.Column="1" Width="72" HorizontalAlignment="Right"
                                              VerticalAlignment="Center" Text="0"/>

@@ -103,6 +103,32 @@ internal static class Marquee
     }
 }
 
+/// <summary>文字阴影的共享实例（原文常规 / 原文加粗 / 第二行）。
+///
+/// 每切一行都 new 一个 Effect 的话，未冻结的 Freezable 要挂一整套变更通知，
+/// 还得让渲染层为每个新实例重新建资源；参数只有三种取值，冻结后共享即可。</summary>
+internal static class TextShadow
+{
+    public static readonly DropShadowEffect Thin = Make(6, 0.6);
+    public static readonly DropShadowEffect Bold = Make(3.5, 0.45);
+    public static readonly DropShadowEffect Second = Make(3, 0.5);
+
+    public static DropShadowEffect For(bool bold) => bold ? Bold : Thin;
+
+    private static DropShadowEffect Make(double blur, double opacity)
+    {
+        var e = new DropShadowEffect
+        {
+            Color = Colors.Black,
+            BlurRadius = blur,
+            ShadowDepth = 0,
+            Opacity = opacity,
+        };
+        e.Freeze();
+        return e;
+    }
+}
+
 /// <summary>可横向滚动的文本宿主：文本按自然宽度排版并溢出渲染（见 NaturalMeasureGrid），
 /// 超宽时切左对齐 + 平移滚动，由外层的 ClipToBounds 容器裁成视口。
 ///
@@ -144,8 +170,15 @@ public abstract class ScrollingTextHost : NaturalMeasureGrid
     protected ScrollingTextHost()
     {
         // 行元素会被切行动画换掉（传送带/淡出后 Remove）。CompositionTarget.Rendering
-        // 是静态事件，漏退订会让整行连同文本、阴影一直被根引用着不回收
-        Unloaded += (_, _) => StopFollowing();
+        // 是静态事件，漏退订会让整行连同文本、阴影一直被根引用着不回收。
+        // 走马灯也必须一并停：它是 RepeatBehavior.Forever，元素移出视觉树后
+        // 那个 clock 仍挂在 WPF 的 timing tree 上逐帧 tick——无逐字数据的长歌词
+        // 每切一行就留下一个，一首歌下来攒几十个白跑的动画
+        Unloaded += (_, _) =>
+        {
+            StopFollowing();
+            Marquee.Clear(this);
+        };
     }
 
     /// <summary>容器告知可用视口宽度（DIP）。窗口宽度随歌词长度/任务栏空档变化，
@@ -288,6 +321,18 @@ public abstract class ScrollingTextHost : NaturalMeasureGrid
         _curX = 0;
     }
 
+    /// <summary>这一行要淡出了：把横向滚动就地定格。
+    ///
+    /// 切行时只暂停逐字 Storyboard 是不够的——平滑跟随是本类自己的
+    /// CompositionTarget.Rendering 订阅，与那个 Storyboard 无关，会继续每帧
+    /// 唤醒 UI 线程做低通滤波、改 TranslateTransform.X。旧行正在淡出，没人再看
+    /// 它滚到哪，这些帧全是白烧的——而它们正落在切行动画那 320ms 里，
+    /// 与新行的滚动、软件光栅化挤同一个 16.7ms 预算。
+    /// 停订阅而不复位位移：位置定格在当前处，视觉上没有跳变。
+    /// 不碰走马灯——它与平滑跟随互斥，且 BeginAnimation(null) 会让 X 掉回基值 0，
+    /// 淡出中的行会横向跳一下。走马灯是属性动画，由渲染线程独立插值，不占 UI 线程。</summary>
+    public void FreezeScroll() => StopFollowing();
+
     /// <summary>本元素所在视觉树的 DPI 缩放（未入树时退回系统主 DPI）。</summary>
     protected double DpiScale()
     {
@@ -372,15 +417,7 @@ public sealed class KaraokeText : ScrollingTextHost
         // 容器级 Effect 会把超出部分先裁进位图，尾部看不到。
         // 粗笔画配大半径阴影会糊成毛边，加粗时换更轻的影子
         var bold = _targetWeight >= FontWeights.SemiBold;
-        var effect = shadow
-            ? new DropShadowEffect
-            {
-                Color = Colors.Black,
-                BlurRadius = bold ? 3.5 : 6,
-                ShadowDepth = 0,
-                Opacity = bold ? 0.45 : 0.6,
-            }
-            : null;
+        var effect = shadow ? TextShadow.For(bold) : null;
         _pending.Effect = effect;
         _accent.Effect = effect;
         _pending.Visibility = words != null ? Visibility.Visible : Visibility.Collapsed;
@@ -445,11 +482,16 @@ public sealed class KaraokeText : ScrollingTextHost
         _wordEndX = new List<double>();
         if (_words == null) return;
         var passed = "";
+        var prevEnd = 0.0;
         foreach (var w in _words)
         {
-            _wordStartX.Add(MeasureWidth(passed, fontSize));
+            // 起点直接取前一个字的终点，不再单独测一遍：测量次数减半。
+            // FormattedText 的构造是切行同步路径上最贵的一环（长句一行几十次），
+            // 而它就发生在切行动画启动的前一刻——省下的都是动画首帧的余量
+            _wordStartX.Add(prevEnd);
             passed += w.Text;
-            _wordEndX.Add(MeasureWidth(passed, fontSize));
+            prevEnd = MeasureWidth(passed, fontSize);
+            _wordEndX.Add(prevEnd);
         }
     }
 
@@ -537,9 +579,7 @@ public sealed class TranslationText : ScrollingTextHost
         _tb.LineHeight = Math.Ceiling(fontSizeDip * 1.3); // 与原文同规则固定行高，保留行间距
         _tb.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
         // 小字号用更轻的阴影，避免发虚；同样挂在 TextBlock 上（容器级会裁掉滚动尾部）
-        _tb.Effect = shadow
-            ? new DropShadowEffect { Color = Colors.Black, BlurRadius = 3, ShadowDepth = 0, Opacity = 0.5 }
-            : null;
+        _tb.Effect = shadow ? TextShadow.Second : null;
         SetNaturalWidth(KaraokeText.MeasureTextWidth(text, family, fontSizeDip, DpiScale()));
     }
 

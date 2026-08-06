@@ -1,7 +1,7 @@
 // 应用入口（对应 Python main.py 的装配）。
 // 用法：TaskbarLyrics.exe                正常运行
 //       TaskbarLyrics.exe --settings     只打开设置窗口（不启动歌词覆盖层）
-//       TaskbarLyrics.exe --lyrics-test "歌名" "歌手"   控制台验证歌词抓取
+//       TaskbarLyrics.exe --lyrics-test "歌名" "歌手" [translation|romaji|off]   控制台验证歌词抓取
 using System.Runtime.InteropServices;
 using System.Windows;
 
@@ -42,7 +42,9 @@ public partial class App : Application
             System.Threading.SynchronizationContext.SetSynchronizationContext(null);
             var title = e.Args[1];
             var artist = e.Args.Length >= 3 ? e.Args[2] : "";
-            Lyrics.RunConsoleTestAsync(title, artist).GetAwaiter().GetResult();
+            // 第 4 个参数指定第二行内容（translation / romaji / off），省略按译文
+            var secondLine = e.Args.Length >= 4 ? e.Args[3] : "translation";
+            Lyrics.RunConsoleTestAsync(title, artist, secondLine).GetAwaiter().GetResult();
             Shutdown(0);
             return;
         }

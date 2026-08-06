@@ -1,4 +1,4 @@
-// 主装配（移植自 main.py 的 App 类）：
+﻿// 主装配（移植自 main.py 的 App 类）：
 // SMTC 后台监听 + 歌词抓取（切歌触发、首选源失败 5s 自愈重试）+
 // 50ms 歌词节拍（本地插值 → 逐字 Seek）+ 1.5s 贴合/全屏检查 + 菜单动作。
 using System.IO;
@@ -25,9 +25,13 @@ public sealed class MainController : IDisposable
     private volatile List<LyricLine>? _lines;
     private volatile Dictionary<int, List<KaraokeWord>> _karaoke = new();
     private volatile string _songKey = "";
+    // 曲库登记的歌曲时长（毫秒，未知为 0）。网易云客户端的 SMTC 完全不上报 timeline
+    // （实测 Position/EndTime 恒为 0、LastUpdatedTime 停在 1601 年），单曲循环检测
+    // 只能靠这个补位。volatile int 而非 double：C# 不允许 volatile double
+    private volatile int _fetchedDurMs;
     private double? _retryAt;
     private int _retryCount;
-    private bool _replayed;      // 单曲循环重播检测标记
+    private double? _lastReplayAt; // 上次单曲循环归零的时刻（节流，理由见 UpdateLine）
     private string _coverSong = ""; // 已处理封面的歌曲
     private byte[]? _shownCoverBytes; // 已上屏的封面字节（引用比较，切歌即清、新字节即换）
     private double? _pausedSince;  // 暂停起始时刻（超时后改显歌曲信息）
@@ -38,6 +42,14 @@ public sealed class MainController : IDisposable
     private string _shownOriginal = "\u0001"; // 初值保证首帧必刷新
     private string _shownTranslation = "";
     private bool _shownHasWords;
+
+    // 无逐字数据时「合成匀速进度」的结果缓存（键：行文本 + 行时长）。
+    // UpdateLine 每 50ms 就跑一轮，而合成结果只取决于这两样，不缓存的话同一句歌词
+    // 显示几秒就要白切几十遍字，且绝大多数结果紧接着就在下面的变化检测里被丢掉。
+    // 不必在切歌时失效：两首歌里凑巧同文本同时长的行，合成出来本来就该一样。
+    private string _synthText = "";
+    private int _synthDurMs;
+    private IReadOnlyList<KaraokeWord>? _synthWords;
     private bool _lastPlaying;
     private bool _forceLine;
     private bool _forceMedia;    // 设置变更后强制重建歌曲信息层
@@ -104,7 +116,6 @@ public sealed class MainController : IDisposable
         HookOverlay(_overlay);
         _overlay.Show();
         _tray = new TrayIcon(this);
-
         // 自启路径自愈：exe 挪位置后注册表里的旧路径会静默失效，启动时幂等刷新
         try { if (Autostart.IsEnabled()) Autostart.SetEnabled(true); }
         catch (SystemException) { /* 注册表写失败不致命 */ }
@@ -178,11 +189,12 @@ public sealed class MainController : IDisposable
             if (state.Key != _songKey)
             {
                 _retryCount = 0;
-                _replayed = false; // 切歌后重置单曲循环检测
+                _lastReplayAt = null; // 切歌后重置单曲循环检测
                 // 切歌立即清掉旧歌词：新歌词抓到前若继续用旧表定位新歌进度，
                 // 会定位不到行而把窗口当成“无内容”隐藏（消失好几句才回来）
                 _lines = null;
                 _karaoke = new Dictionary<int, List<KaraokeWord>>();
+                _fetchedDurMs = 0; // 上一首的时长不能用来判新歌的重播
             }
             _songKey = state.Key;
             _retryAt = null;
@@ -201,9 +213,10 @@ public sealed class MainController : IDisposable
             List<LyricLine>? lines;
             Dictionary<int, List<KaraokeWord>> karaoke;
             string source;
+            var songDurS = 0.0;
             try
             {
-                (lines, karaoke, source) = await Lyrics.FetchAsync(
+                (lines, karaoke, source, songDurS) = await Lyrics.FetchAsync(
                     title, artist, durationS, withKaraoke, secondLine);
             }
             catch
@@ -213,6 +226,7 @@ public sealed class MainController : IDisposable
             if (version != _fetchVersion || _quit) return; // 已有更新的抓取
             _lines = lines;
             _karaoke = karaoke;
+            _fetchedDurMs = (int)(songDurS * 1000);
             if ((lines == null || source != "_fetch_netease") && _retryCount < 2)
             {
                 _retryCount++;
@@ -302,18 +316,36 @@ public sealed class MainController : IDisposable
         if (lines is { Count: > 0 })
         {
             var posMs = Math.Max(0, (int)(state.CurrentPositionS() * 1000) + Cfg.OffsetMs);
-            // 单曲循环检测：插值进度超过歌曲时长 → 判定为重播，计时归零。
+            // 单曲循环检测：插值进度超过歌曲时长 → 判定为重播，计时归位。
             // 必须用未截断进度：截断进度永不超过 DurationS，
             // 长尾奏（>20s）歌曲会在第一次播放的尾奏里被误判成重播
             var unclampedMs = (int)(state.CurrentPositionUnclampedS() * 1000);
-            if (!_replayed && (state.DurationS > 0
-                    ? unclampedMs > (int)(state.DurationS * 1000) + 2000
-                    : posMs > lines[^1].Ms + 20000)) // 时长未知时退回旧启发式
+            // 歌曲时长：SMTC 优先，网易云那种压根不上报 timeline 的用曲库登记的时长补。
+            // 时长来自曲库时容差放宽些——匹配到的可能是同一首歌的另一版本，差几秒很常见
+            var songDurS = state.DurationS > 0 ? state.DurationS : _fetchedDurMs / 1000.0;
+            var tolMs = state.DurationS > 0 ? 2000 : 5000;
+            // 一无所知时才退回启发式。余量原先是 20s，尾奏长过它的歌（长器乐尾奏、
+            // Live 版）一进尾奏就被判成重播、进度归零、显示回开头那句——主人反馈的
+            // 「快结束时又显示开头歌词」就是这条。放宽到 45s：宁可漏判一次重播
+            // （歌词多停在末句几秒，之后靠下面的余数归位自动追上），也不能错判
+            var assumedEndMs = songDurS > 0 ? (int)(songDurS * 1000) : lines[^1].Ms + 45000;
+            // 归零必须节流，但不能只允许一次：
+            // 播放器把 DurationS 报小（或尾奏长于上报时长）时，归位后下一轮读到的真实
+            // 进度依旧超时，不节流就会每 0.5s 归位一次、歌词永远卡在第一行；可只归位一次
+            // 又会让单曲循环从第三遍起彻底失效——标记一旦置位就只有切歌才复位。
+            // 闸门取半首歌长：真正的重播得走完整首才会再次触发，绝不会被这道闸挡住。
+            var replayGuardS = songDurS > 0 ? Math.Max(20.0, songDurS * 0.5) : 20.0;
+            if ((_lastReplayAt == null || Clock.Now - _lastReplayAt.Value > replayGuardS)
+                && unclampedMs > assumedEndMs + tolMs)
             {
-                _replayed = true;
-                state.BasePositionS = 0.0;
+                _lastReplayAt = Clock.Now;
+                // 归位到「已经进入第二遍多少」，而不是一律归零：判定天生滞后
+                // （得等插值越过歌曲末尾才知道），归零会把这段滞后量当成永久错位
+                // 摊到整首歌上——第二遍从头到尾都比人声慢一截
+                var overMs = Math.Max(0, unclampedMs - assumedEndMs);
+                state.BasePositionS = overMs / 1000.0;
                 state.BaseTime = Clock.Now;
-                posMs = Math.Max(0, Cfg.OffsetMs);
+                posMs = Math.Max(0, overMs + Cfg.OffsetMs);
             }
             var (index, orig, trans) = Lyrics.CurrentLine(lines, posMs);
             if (index < 0)
@@ -348,7 +380,13 @@ public sealed class MainController : IDisposable
                         var lineDur = index + 1 < lines.Count
                             ? Math.Clamp(lines[index + 1].Ms - lines[index].Ms, 800, 10000)
                             : 5000;
-                        words = Lyrics.SynthesizeWords(orig, lineDur);
+                        if (_synthWords == null || _synthDurMs != lineDur || _synthText != orig)
+                        {
+                            _synthWords = Lyrics.SynthesizeWords(orig, lineDur);
+                            _synthText = orig;
+                            _synthDurMs = lineDur;
+                        }
+                        words = _synthWords;
                     }
                 }
             }
@@ -383,7 +421,21 @@ public sealed class MainController : IDisposable
 
     // ---- 菜单动作 ----
 
-    public void SaveCfg() => Cfg.Save();
+    private bool _cfgSaveWarned;
+
+    /// <summary>存配置。连退路（%AppData%）都写不进去时提示一次：
+    /// 不提示的话用户只会发现「设置每次重启都变回去」，完全无从下手。
+    /// 只提示一次——拖动窗口每次松手都会走到这里。</summary>
+    public void SaveCfg()
+    {
+        if (Cfg.Save() || _cfgSaveWarned) return;
+        _cfgSaveWarned = true;
+        MessageBox.Show(
+            $"设置无法保存到：\n{AppConfig.ConfigPath}\n\n"
+            + "当前修改在本次运行内有效，但重启后会丢失。\n"
+            + "请把程序放到有写入权限的目录（如桌面或用户目录）再试（详情见 error.log）。",
+            "任务栏歌词", MessageBoxButton.OK, MessageBoxImage.Warning);
+    }
 
     public void SetMode(string mode)
     {
@@ -405,6 +457,28 @@ public sealed class MainController : IDisposable
         Cfg.AutoPosition = !Cfg.AutoPosition;
         SaveCfg();
         ApplySettings(refetchLyrics: false);
+    }
+
+    // 歌词偏移的快捷调整范围与设置页保持一致（±3s）：
+    // 菜单能调到设置页校验不接受的值，会变成「一打开设置就报错、不改都存不了」
+    private const int MaxOffsetMs = 3000;
+
+    /// <summary>当前偏移的菜单文案。正值＝歌词提前（posMs 加得多，查到更靠后的行）。</summary>
+    public string OffsetLabel() =>
+        Cfg.OffsetMs == 0 ? "当前无偏移" : $"当前 {Cfg.OffsetMs / 1000.0:+0.0;-0.0}s";
+
+    /// <summary>菜单快调歌词偏移（deltaMs 正数＝更提前）。到边界就停在边界。</summary>
+    public void NudgeOffset(int deltaMs) => SetOffset(Cfg.OffsetMs + deltaMs);
+
+    public void SetOffset(int ms)
+    {
+        var clamped = Math.Clamp(ms, -MaxOffsetMs, MaxOffsetMs);
+        if (clamped == Cfg.OffsetMs) return;
+        Cfg.OffsetMs = clamped;
+        SaveCfg();
+        // 偏移一变，当前该显示的可能已经是另一句了，立刻重算而不是等下一拍
+        _forceLine = true;
+        OnLyricsTick();
     }
 
     // ---- 检查更新 ----
@@ -440,10 +514,15 @@ public sealed class MainController : IDisposable
             Updater.StartApplyAndExit(path, Quit); // 里面会退出本进程
             return "";
         }
-        catch
+        catch (Exception ex)
         {
             _updating = false;
-            return "下载失败，请稍后重试";
+            // 用户主动点的更新失败了，是罕见且需要追查的事，记一条现场
+            // （检查更新的失败不记：不在内网时是常态，会把 error.log 刷满）
+            Log.Error("update-download", ex);
+            return ex is InvalidDataException
+                ? "下载内容异常（更新源可能返回了错误页）"
+                : "下载失败，请稍后重试";
         }
     }
 
@@ -488,9 +567,23 @@ public sealed class MainController : IDisposable
         SaveCfg();
     }
 
+    private SettingsWindow? _settingsWin;
+
+    /// <summary>打开设置窗口（单例）。ShowDialog 的模态只挡 WPF 窗口，
+    /// 托盘图标的宿主是 WinForms 的隐藏窗口、照样响应右键，于是「打开设置…」
+    /// 能在已有窗口之上再开一个：两个窗口各改各的配置、各自保存，后关的那个覆盖先关的。
+    /// 已经开着就把它激活到前台，而不是再造一个。</summary>
     public void OpenSettings()
     {
+        if (_settingsWin is { IsLoaded: true } open)
+        {
+            if (open.WindowState == WindowState.Minimized) open.WindowState = WindowState.Normal;
+            open.Activate();
+            return;
+        }
         var win = new SettingsWindow(this);
+        _settingsWin = win;
+        win.Closed += (_, _) => { if (ReferenceEquals(_settingsWin, win)) _settingsWin = null; };
         win.ShowDialog();
     }
 

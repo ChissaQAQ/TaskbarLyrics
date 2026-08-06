@@ -70,6 +70,16 @@ public sealed class TrayIcon : IDisposable
         menu.Items.Add(Item("锁定位置（鼠标穿透）", cfg.Locked, () => _app.SetLocked(!cfg.Locked)));
         menu.Items.Add(Item("自动避让任务栏元素", cfg.AutoPosition, _app.ToggleAutoPosition));
         menu.Items.Add(new Separator());
+        // 歌词偏移放进菜单：对不上的时候要能一边听一边点着调，
+        // 走设置页得「打开→改数字→应用→关掉」，试一次的成本太高。
+        // 用子菜单收起来，主菜单不至于被三行占掉
+        var offset = new MenuItem { Header = $"歌词偏移（{_app.OffsetLabel()}）" };
+        offset.Items.Add(Item("提前 0.5 秒（歌词比人声慢时选）", false, () => _app.NudgeOffset(500)));
+        offset.Items.Add(Item("延后 0.5 秒（歌词比人声快时选）", false, () => _app.NudgeOffset(-500)));
+        offset.Items.Add(new Separator());
+        offset.Items.Add(Item("归零", false, () => _app.SetOffset(0)));
+        menu.Items.Add(offset);
+        menu.Items.Add(new Separator());
         menu.Items.Add(Item("打开设置…", false, _app.OpenSettings));
         menu.Items.Add(new Separator());
         menu.Items.Add(Item("退出", false, _app.Quit));

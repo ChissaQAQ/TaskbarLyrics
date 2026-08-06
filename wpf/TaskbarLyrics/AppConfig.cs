@@ -15,7 +15,6 @@ public sealed class AppConfig
     [JsonPropertyName("font_bold")] public bool FontBold { get; set; }               // 原文半粗（译文保持常规）
     [JsonPropertyName("text_color")] public string TextColor { get; set; } = "#FFFFFF";
     [JsonPropertyName("trans_color")] public string TransColor { get; set; } = "#C8C8C8";
-    [JsonPropertyName("highlight_color")] public string? HighlightColor { get; set; }  // 预留，None = 跟随系统强调色
     [JsonPropertyName("shadow")] public bool Shadow { get; set; } = true;              // 文字阴影
     [JsonPropertyName("width")] public int Width { get; set; } = 280;                  // 歌词区最大宽度（紧凑布局下内容更窄时收缩，超出才缩字号）
     [JsonPropertyName("text_align")] public string TextAlign { get; set; } = "left"; // center | left（配封面时左对齐更整齐）
@@ -37,7 +36,7 @@ public sealed class AppConfig
     // 歌词
     [JsonPropertyName("second_line")] public string SecondLine { get; set; } = "translation"; // translation | romaji | off
     [JsonPropertyName("karaoke")] public bool Karaoke { get; set; } = true;            // 逐字歌词
-    [JsonPropertyName("offset_ms")] public int OffsetMs { get; set; } = 0;             // 歌词时间偏移（提前为负）
+    [JsonPropertyName("offset_ms")] public int OffsetMs { get; set; } = 0;             // 歌词时间偏移（正为提前：posMs 加得多，查到更靠后的行）
     // 行为
     [JsonPropertyName("hide_on_fullscreen")] public bool HideOnFullscreen { get; set; } = true;
     // 更新
@@ -49,8 +48,15 @@ public sealed class AppConfig
     // 保留 Python 版里未知的扩展键，存盘时不丢
     [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; set; }
 
-    public static readonly string ConfigPath =
+    /// <summary>当前使用的配置文件路径。首选 exe 同目录（便携、删掉即恢复默认），
+    /// 那里写不进去时会切到 <see cref="FallbackPath"/>。</summary>
+    public static string ConfigPath { get; private set; } =
         Path.Combine(AppContext.BaseDirectory, "config.json");
+
+    /// <summary>exe 同目录只读时（装在 Program Files、或从只读介质运行）的退路。</summary>
+    private static string FallbackPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "TaskbarLyrics", "config.json");
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -61,6 +67,8 @@ public sealed class AppConfig
     public static AppConfig Load()
     {
         AppConfig? cfg = null;
+        // exe 同目录优先；没有就看退路——上次可能因为目录只读存到那边去了
+        if (!File.Exists(ConfigPath) && File.Exists(FallbackPath)) ConfigPath = FallbackPath;
         try
         {
             if (File.Exists(ConfigPath))
@@ -88,15 +96,43 @@ public sealed class AppConfig
         return cfg ?? new AppConfig();
     }
 
-    public void Save()
+    private static bool _writeLogged;
+
+    /// <summary>存盘，返回是否成功（连退路都写不进去才算失败，调用方据此提示一次）。
+    ///
+    /// 原先整体吞掉异常：exe 装在 Program Files 之类只读位置时，设置在内存里当场生效、
+    /// 一重启全丢，而且没有任何提示。现在先试 exe 同目录，不行就改存 %AppData%。</summary>
+    public bool Save()
+    {
+        if (TryWrite(ConfigPath)) return true;
+        var fallback = FallbackPath;
+        if (!string.Equals(ConfigPath, fallback, StringComparison.OrdinalIgnoreCase)
+            && TryWrite(fallback))
+        {
+            ConfigPath = fallback; // 之后一直用退路，下次 Load 也会从那里读
+            return true;
+        }
+        return false;
+    }
+
+    private bool TryWrite(string path)
     {
         try
         {
-            File.WriteAllText(ConfigPath, JsonSerializer.Serialize(this, JsonOptions));
+            var dir = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            File.WriteAllText(path, JsonSerializer.Serialize(this, JsonOptions));
+            return true;
         }
-        catch
+        catch (Exception ex)
         {
-            // 设置存不上不影响使用
+            // 只记第一次：拖动窗口每次松手都会存盘，失败时会把 error.log 刷满
+            if (!_writeLogged)
+            {
+                _writeLogged = true;
+                Log.Error("config-save", ex);
+            }
+            return false;
         }
     }
 }

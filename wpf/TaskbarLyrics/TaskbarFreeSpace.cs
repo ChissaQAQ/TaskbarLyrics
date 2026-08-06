@@ -24,10 +24,19 @@ public static class TaskbarFreeSpace
         public List<(int L, int R)> Occupied = new();
     }
 
-    private const int RefreshMs = 1000;  // 空档刷新周期（任务栏元素变化不快）
+    // 枚举频率必须做退避，这是内存问题不是性能问题：
+    // UIA 客户端每跑一遍任务栏都会在 uiautomationcore.dll 里漏掉约 10.8 KB 原生内存
+    // （隔离实验：1500 轮涨 32MB，GC.Collect + WaitForPendingFinalizers 一个字节都收不回，
+    //  漏点在系统组件内部，调用方没有任何可 Dispose 的东西）。
+    // 原先固定 1 次/秒 = 38MB/小时 = 910MB/天，连续挂机一天就把自己撑到 OOM 退出。
+    // 任务栏布局其实几乎不变（开关应用、托盘图标增减才变），所以「结果和上一轮一样」
+    // 就把周期翻倍，一路退到 60s；真有变化时由 Nudge()/SetTargets() 立刻拉回 1s。
+    private const int FastRefreshMs = 1000;   // 刚发生变化后的节奏
+    private const int MaxRefreshMs = 60_000;  // 长期静止时的兜底心跳（约 15MB/天）
 
     private static volatile Snapshot? _snap;
     private static volatile bool _stop;
+    private static volatile int _idleMs = FastRefreshMs;
     private static int _started;
     // 目标句柄变化时立刻重测，不等下一个周期：启动首帧和 explorer 重启后
     // 如果还捧着旧快照（或没有快照），窗口会先按默认位置摆出来再跳到空档里
@@ -59,7 +68,16 @@ public static class TaskbarFreeSpace
         var changed = trayHwnd != _wantTray || excludeHwnd != _wantExclude;
         _wantTray = trayHwnd;
         _wantExclude = excludeHwnd;
-        if (changed) Wake.Set();
+        if (changed) Nudge();
+    }
+
+    /// <summary>外部信号「任务栏可能变了」：恢复快节奏并立刻重测。
+    /// 前台窗口切换时调用——开关/最小化应用是任务栏按钮增减的绝大多数来源，
+    /// 有了这个信号，静止期就可以放心退避到 60s 心跳。</summary>
+    public static void Nudge()
+    {
+        _idleMs = FastRefreshMs;
+        Wake.Set();
     }
 
     private static void WorkerLoop()
@@ -73,7 +91,7 @@ public static class TaskbarFreeSpace
                 try { Measure(tray, _wantExclude); }
                 catch { /* UIA 整体失败：保留上一份快照，调用方沿用旧空档不跳位 */ }
             }
-            Wake.Wait(RefreshMs);
+            Wake.Wait(_idleMs);
         }
     }
 
@@ -83,7 +101,11 @@ public static class TaskbarFreeSpace
         if (!NativeMethods.GetClientRect(tray, out var rc) || rc.Right <= 0) return;
         NativeMethods.GetWindowRect(tray, out var wrc);
         var raw = new List<(int L, int R)>();
-        Collect(AutomationElement.FromHandle(tray), rc.Right, wrc.Left, exclude, raw);
+        // UIA 的 NativeWindowHandle 是 int：64 位下句柄本就是截断后塞进去的，
+        // 这里也必须按截断比较。原先在循环里用 IntPtr.ToInt32()，句柄一旦超出 int 范围
+        // 就抛 OverflowException，被外层 catch 吞掉后自己的窗口反倒被算成占用区、把自己挤走
+        Collect(AutomationElement.FromHandle(tray), rc.Right, wrc.Left,
+            unchecked((int)exclude.ToInt64()), raw);
         if (raw.Count == 0) return; // 查询没结果时不覆盖上一份成功的快照
 
         raw.Sort((a, b) => a.L.CompareTo(b.L));
@@ -95,14 +117,33 @@ public static class TaskbarFreeSpace
             else
                 merged.Add((l, r));
         }
+
+        // 结果和上一轮完全一致 → 任务栏静止，周期翻倍（详见上面 FastRefreshMs 处的说明）。
+        // 快照本身不必重新发布，省掉调用方那边无意义的引用变更
+        var prev = _snap;
+        if (prev != null && prev.Tray == tray && prev.TrayWidth == rc.Right
+            && Same(prev.Occupied, merged))
+        {
+            _idleMs = Math.Min(MaxRefreshMs, _idleMs * 2);
+            return;
+        }
+        _idleMs = FastRefreshMs; // 有变化：回到快节奏，紧跟后续的连续变化
         _snap = new Snapshot { Tray = tray, TrayWidth = rc.Right, Occupied = merged };
+    }
+
+    private static bool Same(List<(int L, int R)> a, List<(int L, int R)> b)
+    {
+        if (a.Count != b.Count) return false;
+        for (var i = 0; i < a.Count; i++)
+            if (a[i].L != b[i].L || a[i].R != b[i].R) return false;
+        return true;
     }
 
     /// <summary>递归收集占用矩形：接近全宽的容器继续拆，其余元素计入占用；
     /// 本程序的覆盖窗口（按句柄排除）不算占用。
     /// 单个元素失效（任务栏更新时元素瞬断很常见）只跳过，不拖垮整个查询。</summary>
     private static void Collect(AutomationElement el, int trayWidth, int trayScreenLeft,
-        IntPtr excludeHwnd, List<(int L, int R)> acc)
+        int excludeId, List<(int L, int R)> acc)
     {
         AutomationElementCollection kids;
         try { kids = el.FindAll(TreeScope.Children, Condition.TrueCondition); }
@@ -116,10 +157,10 @@ public static class TaskbarFreeSpace
                 if (r.Width <= 0 || r.Height <= 0) continue;
                 if (r.Width >= trayWidth * 0.9)
                 {
-                    Collect(k, trayWidth, trayScreenLeft, excludeHwnd, acc); // 全宽容器继续拆
+                    Collect(k, trayWidth, trayScreenLeft, excludeId, acc); // 全宽容器继续拆
                     continue;
                 }
-                if (k.Current.NativeWindowHandle == excludeHwnd.ToInt32()) continue; // 跳过自己
+                if (k.Current.NativeWindowHandle == excludeId) continue; // 跳过自己
                 acc.Add(((int)r.Left - trayScreenLeft, (int)r.Right - trayScreenLeft));
             }
             catch

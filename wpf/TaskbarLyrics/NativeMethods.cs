@@ -103,6 +103,11 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool GetCursorPos(out POINT lpPoint);
 
+    /// <summary>光标位置最顶层的窗口。注意：分层窗口（本程序的覆盖层）
+    /// 全透明的像素会被穿透，命中到它下面那层去。</summary>
+    [DllImport("user32.dll")]
+    public static extern IntPtr WindowFromPoint(POINT Point);
+
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
 
@@ -135,6 +140,26 @@ internal static class NativeMethods
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern int GetClassNameW(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
+
+    // ---- 繁简归一化 ----
+
+    private const uint LCMAP_SIMPLIFIED_CHINESE = 0x02000000;
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern int LCMapStringEx(string lpLocaleName, uint dwMapFlags,
+        string lpSrcStr, int cchSrc, [Out] char[]? lpDestStr, int cchDest,
+        IntPtr lpVersionInformation, IntPtr lpReserved, IntPtr sortHandle);
+
+    /// <summary>繁体转简体（系统自带的映射表，不必自己维护几千字的对照）。
+    /// 这个 flag 是逐字映射、字数不变，所以目标缓冲区按原长开就够；映射失败原样返回。</summary>
+    public static string ToSimplifiedChinese(string s)
+    {
+        if (s.Length == 0) return s;
+        var buf = new char[s.Length];
+        var n = LCMapStringEx("zh-CN", LCMAP_SIMPLIFIED_CHINESE, s, s.Length, buf, buf.Length,
+            IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+        return n > 0 ? new string(buf, 0, n) : s;
+    }
 
     // ---- WinEvent 钩子（前台切换即时重摆窗口）----
 
@@ -277,8 +302,30 @@ internal static class NativeMethods
         return bars;
     }
 
+    // 同一拍里 CurrentHeightDip / Dock / ApplyPosition / OnMouseMove 会各要一次任务栏句柄，
+    // 每次都重新枚举显示器 + FindWindowEx 纯属白烧（Dock 本身还每 1.5s 跑一遍）。
+    // 缓存 1 秒：既省掉同一拍内的重复枚举，又不至于在 explorer 重启或显示器插拔后
+    // 长期抱着一个失效句柄（句柄有效性另外用 IsWindow 兜一道）。
+    // 只在 UI 线程调用，故不加锁——真撞上了也只是多解析一次。
+    private static int _tbCacheIndex = -1;
+    private static (IntPtr Tray, IntPtr Notify) _tbCache;
+    private static double _tbCacheAt = double.NegativeInfinity;
+
     /// <summary>按显示器序号找任务栏，返回 (任务栏句柄, 托盘通知区句柄)；找不到回退主任务栏。</summary>
     public static (IntPtr Tray, IntPtr Notify) ResolveTaskbar(int monitorIndex)
+    {
+        if (monitorIndex == _tbCacheIndex
+            && Clock.Now - _tbCacheAt < 1.0
+            && _tbCache.Tray != IntPtr.Zero
+            && IsWindow(_tbCache.Tray))
+            return _tbCache;
+
+        var result = ResolveTaskbarUncached(monitorIndex);
+        (_tbCacheIndex, _tbCache, _tbCacheAt) = (monitorIndex, result, Clock.Now);
+        return result;
+    }
+
+    private static (IntPtr Tray, IntPtr Notify) ResolveTaskbarUncached(int monitorIndex)
     {
         var mons = Monitors();
         var bars = Taskbars();
