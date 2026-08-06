@@ -41,6 +41,9 @@ public sealed class AppConfig
     [JsonPropertyName("hide_on_fullscreen")] public bool HideOnFullscreen { get; set; } = true;
     // 更新
     [JsonPropertyName("update_check")] public bool UpdateCheck { get; set; } = true;   // 启动时自动检查新版本
+    // 上次成功检查更新的 unix 秒。只用于给启动检查节流：GitHub 匿名接口每小时 60 次
+    // 且按出口 IP 算，频繁重启（或共用出口的多台机器）会白白耗掉配额
+    [JsonPropertyName("last_update_check")] public long LastUpdateCheck { get; set; }
     // 播放源
     [JsonPropertyName("player_source")] public string PlayerSource { get; set; } = "auto"; // auto | netease | others
     [JsonPropertyName("player_blocklist")] public List<string> PlayerBlocklist { get; set; } = new() { "chrome", "msedge", "firefox" };

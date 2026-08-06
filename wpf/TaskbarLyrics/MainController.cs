@@ -2,6 +2,7 @@
 // SMTC 后台监听 + 歌词抓取（切歌触发、首选源失败 5s 自愈重试）+
 // 50ms 歌词节拍（本地插值 → 逐字 Seek）+ 1.5s 贴合/全屏检查 + 菜单动作。
 using System.IO;
+using System.Net.Http;
 using System.Threading;
 using System.Windows;
 using System.Windows.Media;
@@ -121,11 +122,16 @@ public sealed class MainController : IDisposable
         catch (SystemException) { /* 注册表写失败不致命 */ }
 
         Updater.Cleanup(); // 清掉上次更新留下的临时新 exe
-        if (Cfg.UpdateCheck) // 启动时自动检查更新（发现新版本 → 右键菜单出现更新入口）
+        // 启动时自动检查更新（发现新版本 → 右键菜单出现更新入口）。
+        // 距上次成功检查不足 6 小时就跳过：新版一天也发不了几个，而 GitHub 匿名接口
+        // 每小时只有 60 次配额、还是按出口 IP 共享的，一天开关十几次机器就能耗掉一截；
+        // 真撞上限流反而查不到更新。用户手动点「检查更新」不受这里限制
+        if (Cfg.UpdateCheck
+            && DateTimeOffset.UtcNow.ToUnixTimeSeconds() - Cfg.LastUpdateCheck > 6 * 3600)
             _ = Task.Run(async () =>
             {
                 try { await CheckForUpdateAsync(); }
-                catch { /* 启动检查失败静默 */ }
+                catch { /* 启动检查失败静默（失败原因已在 CheckForUpdateAsync 里落日志） */ }
             });
 
         _lyricsTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
@@ -493,13 +499,25 @@ public sealed class MainController : IDisposable
         try
         {
             var (latest, hasUpdate) = await Updater.CheckLatestAsync();
-            if (latest == null) return "检查失败，请稍后重试";
+            // 记下成功时刻：启动检查据此节流（见构造里的启动检查处）
+            Cfg.LastUpdateCheck = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            Cfg.Save(); // 存不进去只会让下次启动照旧检查一遍，无需理会失败
+            if (latest == null) return "发布版本里没有可用的安装包";
             PendingUpdate = hasUpdate ? latest : null;
             return hasUpdate ? $"发现新版本 {latest.Tag}" : $"已是最新版本（v{Updater.CurrentVersion}）";
         }
-        catch
+        catch (UpdateCheckException ex)
         {
-            return "检查失败，请稍后重试";
+            // 原因明确（限流 / 404 / 5xx），直接把话讲给用户，不必记日志
+            return ex.Message;
+        }
+        catch (Exception ex)
+        {
+            // 原先这里空吞：用户看到「检查失败」，error.log 里一个字都没有，无从下手
+            Log.Error("update-check", ex);
+            return ex is HttpRequestException or TaskCanceledException
+                ? "连不上 GitHub（网络不通或被拦截），请稍后重试"
+                : "检查失败，请稍后重试";
         }
     }
 
@@ -518,7 +536,7 @@ public sealed class MainController : IDisposable
         {
             _updating = false;
             // 用户主动点的更新失败了，是罕见且需要追查的事，记一条现场
-            // （检查更新的失败不记：不在内网时是常态，会把 error.log 刷满）
+            // （检查更新那边同样会记，但原因讲得清的失败——限流、404——只回文案不记）
             Log.Error("update-download", ex);
             return ex is InvalidDataException
                 ? "下载内容异常（更新源可能返回了错误页）"

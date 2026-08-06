@@ -2,6 +2,7 @@
 // 用法：TaskbarLyrics.exe                正常运行
 //       TaskbarLyrics.exe --settings     只打开设置窗口（不启动歌词覆盖层）
 //       TaskbarLyrics.exe --lyrics-test "歌名" "歌手" [translation|romaji|off]   控制台验证歌词抓取
+//       TaskbarLyrics.exe --update-test                                        控制台验证检查更新与配额
 using System.Runtime.InteropServices;
 using System.Windows;
 
@@ -45,6 +46,17 @@ public partial class App : Application
             // 第 4 个参数指定第二行内容（translation / romaji / off），省略按译文
             var secondLine = e.Args.Length >= 4 ? e.Args[3] : "translation";
             Lyrics.RunConsoleTestAsync(title, artist, secondLine).GetAwaiter().GetResult();
+            Shutdown(0);
+            return;
+        }
+
+        // 检查更新诊断入口：TaskbarLyrics.exe --update-test
+        if (e.Args.Length >= 1 && e.Args[0] == "--update-test")
+        {
+            AttachConsole(-1);
+            Console.OutputEncoding = System.Text.Encoding.UTF8;
+            System.Threading.SynchronizationContext.SetSynchronizationContext(null);
+            Updater.RunConsoleTestAsync().GetAwaiter().GetResult();
             Shutdown(0);
             return;
         }
