@@ -139,6 +139,12 @@ public static class TaskbarFreeSpace
         return true;
     }
 
+    // Win10 时代的任务栏容器窗口类。Win11 把任务栏整个换成了 XAML，这些窗口还在，
+    // 但报的矩形是过时的（主屏 ReBarWindow32，副屏 WorkerW）
+    private static readonly HashSet<string> LegacyShellClasses = new() { "ReBarWindow32", "WorkerW" };
+    // Win11 的第一个版本是 build 22000
+    private static readonly bool IsWin11 = Environment.OSVersion.Version.Build >= 22000;
+
     /// <summary>递归收集占用矩形：接近全宽的容器继续拆，其余元素计入占用；
     /// 本程序的覆盖窗口（按句柄排除）不算占用。
     /// 单个元素失效（任务栏更新时元素瞬断很常见）只跳过，不拖垮整个查询。</summary>
@@ -161,6 +167,14 @@ public static class TaskbarFreeSpace
                     continue;
                 }
                 if (k.Current.NativeWindowHandle == excludeId) continue; // 跳过自己
+                // Win11 上的 Win10 遗留任务栏残骸：新任务栏是 XAML 画的，但旧的容器窗口
+                // 还挂在树上，报着一个跟实际布局毫无关系的旧矩形，而且
+                // IsOffscreen=False、IsWindowVisible=True——两种可见性判据都过滤不掉它。
+                // Win11 图标居中，图标一少真图标区就往中间收缩，这块不动的旧矩形
+                // 会凭空吃掉几百像素可用区（主屏是 ReBarWindow32，副屏任务栏是 WorkerW）。
+                // 按系统版本判而不是光看类名：这两个类在 Win10 上是包着整个任务列表的
+                // 真实容器，跳掉的话连里面的按钮一起漏掉，窗口就会压在图标上
+                if (IsWin11 && LegacyShellClasses.Contains(k.Current.ClassName)) continue;
                 acc.Add(((int)r.Left - trayScreenLeft, (int)r.Right - trayScreenLeft));
             }
             catch
@@ -170,13 +184,20 @@ public static class TaskbarFreeSpace
         }
     }
 
+    // 空档窄到这个数以下（client 像素）摆什么都是一团糊，宁可不认这个空档，
+    // 让调用方沿用上次的位置
+    private const int MinGapWidth = 60;
+    // 对面半边比指定半边宽出这么多才值得跨过去（约 3 个 12pt 汉字）。
+    // 不设门槛的话两边宽度稍有变化窗口就来回搬家
+    private const int CrossSideMargin = 40;
+
     /// <summary>在任务栏上找最合适的空档（client 像素坐标）。纯计算，只读后台快照。
-    /// wantWidth：窗口期望宽度（自然宽度，非收缩后）；currentX：窗口当前 x；
-    /// preferSide：left | right，放得下的空档里优先选指定半边（空间恢复时自动"回家"）。
+    /// wantWidth：窗口期望宽度（自然宽度，非收缩后）；minWidth：还能好好显示的最小宽度；
+    /// currentX：窗口当前 x；preferSide：left | right，优先待在哪半边。
     /// 快照还没就绪（启动头一秒）或任务栏已换（explorer 重启）时返回 null，
     /// 调用方回退默认摆放。</summary>
     public static (int L, int R)? FindBestGap(IntPtr trayHwnd, IntPtr excludeHwnd,
-        int wantWidth, int currentX, string preferSide)
+        int wantWidth, int minWidth, int currentX, string preferSide)
     {
         SetTargets(trayHwnd, excludeHwnd);
         var snap = _snap;
@@ -209,15 +230,33 @@ public static class TaskbarFreeSpace
             var center = currentX + wantWidth / 2.0;
             return fitting.OrderBy(g => Math.Abs((g.L + g.R) / 2.0 - center)).First();
         }
-        // 没有放得下的：优先指定半边里最宽的，其次全局最宽（调用方负责收缩窗口）
-        var pool = gaps.Where(InSide).ToList();
-        if (pool.Count == 0) pool = gaps;
-        (int L, int R)? best = null;
-        var bestW = 60;
-        foreach (var g in pool)
+
+        // 装不满：退一步找装得下「最小可读宽度」的，仍然优先指定半边。
+        // 这一档取最宽而不是取就近——反正要缩，能多一个字是一个字
+        var usable = gaps.Where(g => g.R - g.L >= minWidth).ToList();
+        var usableInSide = Widest(usable.Where(InSide));
+        if (usableInSide != null) return usableInSide;
+        var usableAny = Widest(usable);
+        if (usableAny != null) return usableAny;
+
+        // 连最小可读都装不下：这时候侧向偏好是软的。原先它是硬约束——
+        // 指定半边只要有一条缝就往里挤，哪怕对面宽出一大截。实测过一次
+        // 右半边只有 255px、左半边有 337px，窗口硬挤在右边缩到 247px，
+        // 长歌名当场被切掉，看着像被旁边的图标压住了
+        var sideBest = Widest(gaps.Where(InSide));
+        var anyBest = Widest(gaps);
+        if (sideBest == null) return anyBest;
+        if (anyBest == null) return sideBest;
+        return anyBest.Value.R - anyBest.Value.L >= sideBest.Value.R - sideBest.Value.L + CrossSideMargin
+            ? anyBest : sideBest;
+
+        static (int L, int R)? Widest(IEnumerable<(int L, int R)> pool)
         {
-            if (g.R - g.L > bestW) { bestW = g.R - g.L; best = g; }
+            (int L, int R)? best = null;
+            var bestW = MinGapWidth;
+            foreach (var g in pool)
+                if (g.R - g.L > bestW) { bestW = g.R - g.L; best = g; }
+            return best;
         }
-        return best;
     }
 }

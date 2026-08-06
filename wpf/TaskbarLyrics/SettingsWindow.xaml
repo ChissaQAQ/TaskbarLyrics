@@ -262,6 +262,35 @@
             <Setter Property="VerticalAlignment" Value="Center"/>
             <Setter Property="HorizontalAlignment" Value="Right"/>
         </Style>
+        <!-- 预设色块：Tag 里放 hex，点一下填进旁边的输入框。
+             自己写模板而不是用默认 Button：默认模板会把自己的背景画在最外层，
+             色块的颜色就看不见了 -->
+        <Style x:Key="ColorChip" TargetType="Button">
+            <Setter Property="Width" Value="20"/>
+            <Setter Property="Height" Value="18"/>
+            <Setter Property="Margin" Value="0,0,4,0"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Chip" CornerRadius="4" BorderThickness="1"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}"/>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Chip" Property="BorderBrush"
+                                        Value="{DynamicResource AccentFillColorDefaultBrush}"/>
+                                <Setter TargetName="Chip" Property="BorderThickness" Value="2"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.4"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Window.Resources>
 
     <Grid UseLayoutRounding="True">
@@ -608,12 +637,38 @@
                                         <ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                                        <TextBlock Style="{StaticResource RowTitle}" Text="文字颜色"/>
+                                        <TextBlock Style="{StaticResource RowDesc}" Text="跟随系统时：深色任务栏白字、浅色任务栏深字，切换主题自动跟上"/>
+                                    </StackPanel>
+                                    <ComboBox x:Name="ColorModeCombo" Grid.Column="1" Style="{StaticResource RowCombo}"
+                                              SelectionChanged="ColorModeCombo_SelectionChanged">
+                                        <ComboBoxItem Content="跟随系统明暗"/>
+                                        <ComboBoxItem Content="自定义"/>
+                                    </ComboBox>
+                                </Grid>
+                                <Border Style="{StaticResource RowSeparator}"/>
+                                <Grid Style="{StaticResource Row}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
                                         <TextBlock Style="{StaticResource RowTitle}" Text="原文颜色"/>
-                                        <TextBlock Style="{StaticResource RowDesc}" Text="格式 #RRGGBB"/>
+                                        <TextBlock Style="{StaticResource RowDesc}" Text="格式 #RRGGBB，或点右边的预设色"/>
                                     </StackPanel>
                                     <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right"
                                                 VerticalAlignment="Center">
-                                        <TextBox x:Name="TextColorBox" Width="76" TextChanged="ColorBox_TextChanged"/>
+                                        <Button x:Name="TextChip1" Style="{StaticResource ColorChip}" Background="#FFFFFF"
+                                                Tag="#FFFFFF" ToolTip="白（深色任务栏）" Click="ColorChip_Click"/>
+                                        <Button x:Name="TextChip2" Style="{StaticResource ColorChip}" Background="#C8C8C8"
+                                                Tag="#C8C8C8" ToolTip="浅灰" Click="ColorChip_Click"/>
+                                        <Button x:Name="TextChip3" Style="{StaticResource ColorChip}" Background="#1A1A1A"
+                                                Tag="#1A1A1A" ToolTip="近黑（浅色任务栏）" Click="ColorChip_Click"/>
+                                        <Button x:Name="TextChip4" Style="{StaticResource ColorChip}" Background="#5A5A5A"
+                                                Tag="#5A5A5A" ToolTip="中灰" Click="ColorChip_Click"/>
+                                        <!-- 88 而不是 76：#RRGGBB 是 7 个字，但雅黑里 C/8 比 F 宽，
+                                             76 下 #C8C8C8 最后一位会被裁掉，看着像填错了 -->
+                                        <TextBox x:Name="TextColorBox" Width="88" Margin="4,0,0,0"
+                                                 TextChanged="ColorBox_TextChanged"/>
                                         <Border x:Name="TextColorSwatch" Width="24" Height="18" Margin="8,0,0,0"
                                                 BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1"
                                                 CornerRadius="4" VerticalAlignment="Center"/>
@@ -626,11 +681,20 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
                                         <TextBlock Style="{StaticResource RowTitle}" Text="译文颜色"/>
-                                        <TextBlock Style="{StaticResource RowDesc}" Text="格式 #RRGGBB"/>
+                                        <TextBlock Style="{StaticResource RowDesc}" Text="格式 #RRGGBB，或点右边的预设色"/>
                                     </StackPanel>
                                     <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right"
                                                 VerticalAlignment="Center">
-                                        <TextBox x:Name="TransColorBox" Width="76" TextChanged="ColorBox_TextChanged"/>
+                                        <Button x:Name="TransChip1" Style="{StaticResource ColorChip}" Background="#FFFFFF"
+                                                Tag="#FFFFFF" ToolTip="白" Click="ColorChip_Click"/>
+                                        <Button x:Name="TransChip2" Style="{StaticResource ColorChip}" Background="#C8C8C8"
+                                                Tag="#C8C8C8" ToolTip="浅灰（深色任务栏）" Click="ColorChip_Click"/>
+                                        <Button x:Name="TransChip3" Style="{StaticResource ColorChip}" Background="#1A1A1A"
+                                                Tag="#1A1A1A" ToolTip="近黑" Click="ColorChip_Click"/>
+                                        <Button x:Name="TransChip4" Style="{StaticResource ColorChip}" Background="#5A5A5A"
+                                                Tag="#5A5A5A" ToolTip="中灰（浅色任务栏）" Click="ColorChip_Click"/>
+                                        <TextBox x:Name="TransColorBox" Width="88" Margin="4,0,0,0"
+                                                 TextChanged="ColorBox_TextChanged"/>
                                         <Border x:Name="TransColorSwatch" Width="24" Height="18" Margin="8,0,0,0"
                                                 BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1"
                                                 CornerRadius="4" VerticalAlignment="Center"/>
@@ -643,7 +707,7 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
                                         <TextBlock Style="{StaticResource RowTitle}" Text="文字阴影"/>
-                                        <TextBlock Style="{StaticResource RowDesc}" Text="深色投影，提升在浅色任务栏上的可读性"/>
+                                        <TextBlock Style="{StaticResource RowDesc}" Text="给笔画描一层反差色（深字配白影、浅字配黑影），压在花哨壁纸上也看得清"/>
                                     </StackPanel>
                                     <ToggleButton x:Name="ShadowSwitch" Grid.Column="1" Style="{StaticResource Switch}"
                                                   VerticalAlignment="Center"/>

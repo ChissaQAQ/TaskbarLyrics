@@ -44,16 +44,17 @@
         <Border x:Name="FloatBg" CornerRadius="8" Background="#B3222226"
                 Margin="1" Visibility="Collapsed"/>
         <!-- 悬停遮罩：淡白圆角底（对标 Win11 任务栏图标悬停），
-             Margin 内缩，范围略小于任务栏高度，平时透明 -->
-        <Border x:Name="HoverMask" Background="#17FFFFFF" CornerRadius="6"
+             Margin 内缩，范围略小于任务栏高度，平时透明。
+             底色由 ApplyThemeChrome 按任务栏明暗设置（浅色任务栏上要换成淡黑） -->
+        <Border x:Name="HoverMask" CornerRadius="6"
                 Margin="2,4" Opacity="0" IsHitTestVisible="False"
                 HorizontalAlignment="Left"/>
         <!-- 封面区：占位底（无封面时显示音符占位）+ 封面图（有封面时盖住占位） -->
         <Grid x:Name="CoverZone" HorizontalAlignment="Left" VerticalAlignment="Center"
               Margin="6,0,0,0" Visibility="Collapsed">
-            <Rectangle RadiusX="4" RadiusY="4" Fill="#2EFFFFFF"/>
-            <TextBlock Text="&#xE189;" FontFamily="Segoe MDL2 Assets" FontSize="13"
-                       Foreground="#99FFFFFF" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            <Rectangle x:Name="PlaceholderBg" RadiusX="4" RadiusY="4"/>
+            <TextBlock x:Name="PlaceholderIcon" Text="&#xE189;" FontFamily="Segoe MDL2 Assets" FontSize="13"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
             <Rectangle x:Name="CoverRect" RadiusX="4" RadiusY="4"/>
         </Grid>
         <!-- 主体区：按钮列（宿主宽度可动画，悬停时 0→96 展开，内容随之平滑右移）+ 内容列 -->

@@ -13,6 +13,10 @@ public sealed class AppConfig
     [JsonPropertyName("font_family")] public string FontFamily { get; set; } = "Microsoft YaHei UI";
     [JsonPropertyName("font_size")] public int FontSize { get; set; } = 12;            // 原文字号
     [JsonPropertyName("font_bold")] public bool FontBold { get; set; }               // 原文半粗（译文保持常规）
+    // auto：跟随系统任务栏明暗自动取色（深色任务栏白字、浅色任务栏近黑字）；
+    // custom：用下面两个 hex。默认 auto——浅色任务栏上白字几乎看不见，
+    // 而绝大多数人不会主动去设置里改颜色，默认就得是对的
+    [JsonPropertyName("text_color_mode")] public string TextColorMode { get; set; } = "auto";
     [JsonPropertyName("text_color")] public string TextColor { get; set; } = "#FFFFFF";
     [JsonPropertyName("trans_color")] public string TransColor { get; set; } = "#C8C8C8";
     [JsonPropertyName("shadow")] public bool Shadow { get; set; } = true;              // 文字阴影

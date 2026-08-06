@@ -112,10 +112,37 @@ public partial class SettingsWindow : Window
         WidthCombo.Text = cfg.Width.ToString();
         TextColorBox.Text = cfg.TextColor;
         TransColorBox.Text = cfg.TransColor;
+        ColorModeCombo.SelectedIndex = cfg.TextColorMode == "custom" ? 1 : 0;
         ShadowSwitch.IsChecked = cfg.Shadow;
         ShowCoverSwitch.IsChecked = cfg.ShowCover;
         ShowControlsSwitch.IsChecked = cfg.ShowControls;
         UpdateSwatches();
+        UpdateColorEnabled();
+    }
+
+    /// <summary>跟随系统时把颜色输入框和预设色块置灰：留着能点却不生效最气人。</summary>
+    private void UpdateColorEnabled()
+    {
+        var custom = ColorModeCombo.SelectedIndex == 1;
+        foreach (var el in new UIElement[]
+                 {
+                     TextColorBox, TransColorBox,
+                     TextChip1, TextChip2, TextChip3, TextChip4,
+                     TransChip1, TransChip2, TransChip3, TransChip4,
+                 })
+            el.IsEnabled = custom;
+        TextColorSwatch.Opacity = custom ? 1 : 0.4;
+        TransColorSwatch.Opacity = custom ? 1 : 0.4;
+    }
+
+    private void ColorModeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateColorEnabled();
+
+    /// <summary>点预设色块：把 hex 填进对应的输入框（色板预览由 TextChanged 顺带刷新）。</summary>
+    private void ColorChip_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button b || b.Tag is not string hex) return;
+        var box = b.Name.StartsWith("Text", StringComparison.Ordinal) ? TextColorBox : TransColorBox;
+        box.Text = hex;
     }
 
     private static bool TryParseColor(string hex, out Color color)
@@ -156,7 +183,9 @@ public partial class SettingsWindow : Window
             MessageBox.Show("歌词偏移需在 -3~3 秒之间", "任务栏歌词", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
         }
-        if (!TryParseColor(TextColorBox.Text, out _) || !TryParseColor(TransColorBox.Text, out _))
+        var customColor = ColorModeCombo.SelectedIndex == 1;
+        // 跟随系统时这两个框根本不参与取色，没必要因为里面留着的旧文本拦着人保存
+        if (customColor && (!TryParseColor(TextColorBox.Text, out _) || !TryParseColor(TransColorBox.Text, out _)))
         {
             MessageBox.Show("颜色格式应为 #RRGGBB", "任务栏歌词", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
@@ -189,8 +218,14 @@ public partial class SettingsWindow : Window
         cfg.FontBold = FontBoldSwitch.IsChecked == true;
         cfg.Width = width;
         cfg.TextAlign = AlignCombo.SelectedIndex == 1 ? "left" : "center";
-        cfg.TextColor = TextColorBox.Text.Trim();
-        cfg.TransColor = TransColorBox.Text.Trim();
+        cfg.TextColorMode = customColor ? "custom" : "auto";
+        if (customColor)
+        {
+            // 只在自定义模式下回写：跟随系统时框里可能是没校验过的内容，
+            // 写进去等用户哪天切到自定义就会拿到一个坏值
+            cfg.TextColor = TextColorBox.Text.Trim();
+            cfg.TransColor = TransColorBox.Text.Trim();
+        }
         cfg.Shadow = ShadowSwitch.IsChecked == true;
         cfg.ShowCover = ShowCoverSwitch.IsChecked == true;
         cfg.ShowControls = ShowControlsSwitch.IsChecked == true;

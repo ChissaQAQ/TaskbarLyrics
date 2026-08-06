@@ -103,6 +103,7 @@ public partial class OverlayWindow : Window
             _hwnd = new WindowInteropHelper(this).Handle;
             SetLocked(Cfg.Locked);
             ApplyTextRendering();
+            ApplyThemeChrome();
             Dock();
             // 前台切换即时重摆：任务栏 XAML 层在前台变化瞬间会盖住嵌入窗口，
             // 不等 1.5s 周期兜底，收到事件立刻重断言位置与 z-order
@@ -373,7 +374,7 @@ public partial class OverlayWindow : Window
         TitleText.FontWeight = Cfg.FontBold ? FontWeights.SemiBold : FontWeights.Normal; // 与歌词原文一致
         TitleText.LineHeight = Math.Ceiling(OrigFontDip * 1.3); // 与歌词行同规则固定行高
         TitleText.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
-        TitleText.Foreground = new SolidColorBrush(ParseColor(Cfg.TextColor, Colors.White));
+        TitleText.Foreground = new SolidColorBrush(Theme.TextColor(Cfg));
         TitleText.HorizontalAlignment = align;
         ArtistText.Text = artist;
         ArtistText.FontFamily = family;
@@ -381,7 +382,7 @@ public partial class OverlayWindow : Window
         ArtistText.LineHeight = Math.Ceiling(TransFontDip * 1.3);
         ArtistText.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
         ArtistText.Margin = new Thickness(0, 3, 0, 0); // 与歌词行相同的上下间距
-        ArtistText.Foreground = new SolidColorBrush(ParseColor(Cfg.TransColor, Color.FromRgb(0xC8, 0xC8, 0xC8)));
+        ArtistText.Foreground = new SolidColorBrush(Theme.TransColor(Cfg));
         ArtistText.HorizontalAlignment = align;
         ArtistText.Visibility = artist.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
 
@@ -551,25 +552,27 @@ public partial class OverlayWindow : Window
     private (NaturalMeasureStack Visual, KaraokeText Karaoke, TranslationText? Trans) BuildLineVisual(
         string original, string translation, IReadOnlyList<KaraokeWord>? words)
     {
-        var textColor = ParseColor(Cfg.TextColor, Colors.White);
+        var textColor = Theme.TextColor(Cfg);
         var bright = Freeze(new SolidColorBrush(textColor));
         var pending = Freeze(new SolidColorBrush(Color.FromArgb(140, textColor.R, textColor.G, textColor.B)));
+        var blackShadow = Theme.BlackShadow(textColor);
 
         var align = IsLeftAlign ? HorizontalAlignment.Left : HorizontalAlignment.Center;
         var weight = Cfg.FontBold ? FontWeights.SemiBold : FontWeights.Normal; // 原文半粗更清晰，译文保持常规
         var karaoke = new KaraokeText();
         karaoke.SetLine(original, words, new FontFamily(Cfg.FontFamily), OrigFontDip, bright, pending,
-            Cfg.Shadow, align, weight);
+            Cfg.Shadow, blackShadow, align, weight);
 
         var sp = new NaturalMeasureStack { VerticalAlignment = VerticalAlignment.Center };
         sp.Children.Add(karaoke);
         TranslationText? trans = null;
         if (translation.Length > 0 && Cfg.SecondLine != "off")
         {
-            var transBrush = Freeze(new SolidColorBrush(ParseColor(Cfg.TransColor, Color.FromRgb(0xC8, 0xC8, 0xC8))));
+            var transColor = Theme.TransColor(Cfg);
+            var transBrush = Freeze(new SolidColorBrush(transColor));
             trans = new TranslationText { Margin = new Thickness(0, 3, 0, 0) }; // 与原文之间的行距
             trans.SetText(translation, new FontFamily(Cfg.FontFamily), TransFontDip, transBrush,
-                Cfg.Shadow, align, followProgress: words != null);
+                Cfg.Shadow, Theme.BlackShadow(transColor), align, followProgress: words != null);
             sp.Children.Add(trans);
         }
         return (sp, karaoke, trans);
@@ -589,10 +592,15 @@ public partial class OverlayWindow : Window
         _transLine?.SetViewportWidth(w);
     }
 
-    private static Color ParseColor(string hex, Color fallback)
+    /// <summary>把装饰件（悬停遮罩、封面占位）刷成当前任务栏明暗对应的配色。
+    ///
+    /// 单独一个方法而不是塞进 Dock()：Dock 每 1.5 秒跑一次，
+    /// 每轮重设一遍画刷属性会白白让渲染层重新失效，而这几个颜色只在主题切换时变。</summary>
+    public void ApplyThemeChrome()
     {
-        try { return (Color)ColorConverter.ConvertFromString(hex); }
-        catch { return fallback; }
+        HoverMask.Background = Theme.HoverMask;
+        PlaceholderBg.Fill = Theme.PlaceholderBg;
+        PlaceholderIcon.Foreground = Theme.PlaceholderIcon;
     }
 
     private static T Freeze<T>(T freezable) where T : Freezable { freezable.Freeze(); return freezable; }
@@ -713,14 +721,22 @@ public partial class OverlayWindow : Window
         return (int)Math.Ceiling(h);
     }
 
+    // 自动避让时窗口与两侧图标之间留的间距（client 像素，两侧各留一份）。
+    // 原先是 4px：贴得太近，视觉上跟旁边的图标黏成一片，长歌词滚动裁切的边缘
+    // 正好压在图标边上，看起来像被图标遮住了
+    private const int GapPad = 8;
+    // 内容区窄于这个宽度（DIP）时长歌词只剩几个字在那滚，读不成句子。
+    // 到这一步宁可把封面收掉，把地方全让给文字
+    private const double MinContentDip = 160;
+
     /// <summary>按当前模式与配置摆放窗口（周期调用以跟随任务栏变化/重建）。</summary>
     public void Dock()
     {
         if (_hwnd == IntPtr.Zero) return;
         var heightDip = CurrentHeightDip();
         _lastHeightDip = heightDip;
-        var coverZone = Cfg.ShowCover ? heightDip : 0;
-        _lastCoverZoneDip = coverZone;
+        var showCover = Cfg.ShowCover;
+        var coverZone = showCover ? heightDip : 0;
         var buttonsZone = _showingButtons ? ButtonsWidth : 0;
         var contentW = _showingInfo ? _infoWidthDip : _lyricsWidthDip;
         // 悬停时窗口只许变宽不许变窄：否则光标会被收缩的窗口“甩”出去，悬停态来回抖动
@@ -738,13 +754,25 @@ public partial class OverlayWindow : Window
             {
                 var dpi = DpiScaleX();
                 var wantDip = Cfg.Width + coverZone + buttonsZone;
+                // 最小可接受宽度按「收掉封面后的文字底线」算：宁可先牺牲封面，
+                // 也不要为了留住封面把整条挤到读不了的宽度
+                var minDip = MinContentDip + buttonsZone + GapPad * 2 / dpi;
                 var gap = TaskbarFreeSpace.FindBestGap(
-                    trayHwnd, _hwnd, (int)Math.Round(wantDip * dpi), CurrentTrayX(trayHwnd), Cfg.AutoSide);
+                    trayHwnd, _hwnd, (int)Math.Round(wantDip * dpi), (int)Math.Round(minDip * dpi),
+                    CurrentTrayX(trayHwnd), Cfg.AutoSide);
                 if (gap.HasValue) _autoGap = gap.Value; // 失败则沿用旧空档，不回退跳位
                 if (_autoGap.HasValue)
                 {
                     var g = _autoGap.Value;
-                    var gapDip = (g.R - g.L - 8) / dpi; // 两侧各留 4px，不与图标贴边
+                    var gapDip = (g.R - g.L - GapPad * 2) / dpi; // 两侧各留一份间距，不与图标贴边
+                    // 空档装不下「封面 + 底线宽度的文字」时就把封面收掉：
+                    // 封面没了还认得出在放哪首歌，歌词被切成两个字就真没意义了
+                    if (showCover && gapDip - coverZone - buttonsZone < MinContentDip)
+                    {
+                        showCover = false;
+                        coverZone = 0;
+                        wantDip = Cfg.Width + buttonsZone;
+                    }
                     var want = Math.Min(gapDip, wantDip);
                     if (want < 40) want = Math.Max(24, gapDip);
                     contentW = Math.Max(24, want - coverZone - buttonsZone);
@@ -759,10 +787,11 @@ public partial class OverlayWindow : Window
             // 关掉自动避让的用户照样在漏 UIA 的原生内存
             TaskbarFreeSpace.SetTargets(IntPtr.Zero, IntPtr.Zero);
         }
+        _lastCoverZoneDip = coverZone; // 要等避让降级决定完封面收不收，居中补偿才对得上
 
         // 视觉布局同步
         Height = heightDip;
-        CoverZone.Visibility = Cfg.ShowCover ? Visibility.Visible : Visibility.Collapsed;
+        CoverZone.Visibility = showCover ? Visibility.Visible : Visibility.Collapsed;
         CoverZone.Width = Math.Max(0, heightDip - 12);  // 显式指定宽高 + 垂直居中
         CoverZone.Height = Math.Max(0, heightDip - 12);
         BodyGrid.Margin = new Thickness(coverZone, 0, 0, 0);
@@ -808,14 +837,14 @@ public partial class OverlayWindow : Window
             var coverZonePx = (int)Math.Round(_lastCoverZoneDip * DpiScaleX());
             if (_autoGap.HasValue)
             {
-                // 自动避让：按「停靠对齐」钉空档的边缘/居中（各留 4px）。
+                // 自动避让：按「停靠对齐」钉空档的边缘/居中（各留 GapPad）。
                 // 默认左对齐钉左缘：悬停加按钮时窗口向右扩，封面不推图标
                 var g = _autoGap.Value;
                 x = Cfg.AutoAlign switch
                 {
-                    "right" => g.R - 4 - widthPx,
+                    "right" => g.R - GapPad - widthPx,
                     "center" => (g.L + g.R - widthPx) / 2,
-                    _ => g.L + 4,
+                    _ => g.L + GapPad,
                 };
             }
             else if (Cfg.Position == "custom" && (Cfg.XOffset.HasValue || Cfg.XCenter.HasValue))

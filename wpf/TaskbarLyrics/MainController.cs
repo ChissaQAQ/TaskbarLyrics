@@ -150,6 +150,10 @@ public sealed class MainController : IDisposable
             }
             Overlay.Dock();
             Overlay.UpdateFullscreen();
+            // 顺带盯一眼系统主题：Windows 换深浅色（含日落自动切换）时不给普通窗口
+            // 发任何我们收得到的通知，只能轮询。读一个注册表值的开销远小于这轮已经做的
+            // 任务栏贴合，1.5 秒的延迟用户也察觉不到
+            if (Theme.Refresh()) ApplyTheme();
         };
         _dockTimer.Start();
 
@@ -558,8 +562,24 @@ public sealed class MainController : IDisposable
             _songKey = ""; // 强制重新抓歌词（第二行/逐字内容变化）
         Overlay.Dock();
         Overlay.UpdateFullscreen();
+        Overlay.ApplyThemeChrome();
         _forceLine = true; // 用新外观重建当前行
         _forceMedia = true; // 同步重建歌曲信息层（字体/颜色/对齐可能变了）
+        OnLyricsTick();
+    }
+
+    /// <summary>系统深浅色变了：重刷装饰件配色并重建行视觉。
+    ///
+    /// 必须重建行：颜色是建行时冻结进 Brush 的（冻结是为了让渲染层共享资源），
+    /// 不重建的话画面上一个字都不会变。手动指定了颜色的用户只需要刷装饰件——
+    /// 文字用他自己挑的颜色，不该被系统主题改掉。</summary>
+    private void ApplyTheme()
+    {
+        if (Live == null) return;
+        Overlay.ApplyThemeChrome();
+        if (Cfg.TextColorMode == "custom") return;
+        _forceLine = true;
+        _forceMedia = true;
         OnLyricsTick();
     }
 

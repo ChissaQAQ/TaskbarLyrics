@@ -103,23 +103,33 @@ internal static class Marquee
     }
 }
 
-/// <summary>文字阴影的共享实例（原文常规 / 原文加粗 / 第二行）。
+/// <summary>文字阴影的共享实例（原文常规 / 原文加粗 / 第二行，各配黑白两色）。
 ///
 /// 每切一行都 new 一个 Effect 的话，未冻结的 Freezable 要挂一整套变更通知，
-/// 还得让渲染层为每个新实例重新建资源；参数只有三种取值，冻结后共享即可。</summary>
+/// 还得让渲染层为每个新实例重新建资源；参数取值有限，冻结后共享即可。
+///
+/// 分黑白两套是因为阴影的作用是给笔画描反差：深色文字配黑阴影只会更糊，
+/// 浅色任务栏上要用深字，阴影就得反过来用白的。</summary>
 internal static class TextShadow
 {
-    public static readonly DropShadowEffect Thin = Make(6, 0.6);
-    public static readonly DropShadowEffect Bold = Make(3.5, 0.45);
-    public static readonly DropShadowEffect Second = Make(3, 0.5);
+    private static readonly DropShadowEffect ThinBlack = Make(6, 0.6, Colors.Black);
+    private static readonly DropShadowEffect ThinWhite = Make(6, 0.6, Colors.White);
+    private static readonly DropShadowEffect BoldBlack = Make(3.5, 0.45, Colors.Black);
+    private static readonly DropShadowEffect BoldWhite = Make(3.5, 0.45, Colors.White);
+    private static readonly DropShadowEffect SecondBlack = Make(3, 0.5, Colors.Black);
+    private static readonly DropShadowEffect SecondWhite = Make(3, 0.5, Colors.White);
 
-    public static DropShadowEffect For(bool bold) => bold ? Bold : Thin;
+    public static DropShadowEffect For(bool bold, bool black) =>
+        bold ? black ? BoldBlack : BoldWhite
+             : black ? ThinBlack : ThinWhite;
 
-    private static DropShadowEffect Make(double blur, double opacity)
+    public static DropShadowEffect Second(bool black) => black ? SecondBlack : SecondWhite;
+
+    private static DropShadowEffect Make(double blur, double opacity, Color color)
     {
         var e = new DropShadowEffect
         {
-            Color = Colors.Black,
+            Color = color,
             BlurRadius = blur,
             ShadowDepth = 0,
             Opacity = opacity,
@@ -389,8 +399,8 @@ public sealed class KaraokeText : ScrollingTextHost
 
     /// <summary>设置一行歌词。words 为 null 时整行常亮（无逐字数据）。</summary>
     public void SetLine(string text, IReadOnlyList<KaraokeWord>? words, FontFamily family, double fontSizeDip,
-        Brush bright, Brush pending, bool shadow, HorizontalAlignment align = HorizontalAlignment.Center,
-        FontWeight? weight = null)
+        Brush bright, Brush pending, bool shadow, bool blackShadow,
+        HorizontalAlignment align = HorizontalAlignment.Center, FontWeight? weight = null)
     {
         _text = text;
         _words = words;
@@ -417,7 +427,7 @@ public sealed class KaraokeText : ScrollingTextHost
         // 容器级 Effect 会把超出部分先裁进位图，尾部看不到。
         // 粗笔画配大半径阴影会糊成毛边，加粗时换更轻的影子
         var bold = _targetWeight >= FontWeights.SemiBold;
-        var effect = shadow ? TextShadow.For(bold) : null;
+        var effect = shadow ? TextShadow.For(bold, blackShadow) : null;
         _pending.Effect = effect;
         _accent.Effect = effect;
         _pending.Visibility = words != null ? Visibility.Visible : Visibility.Collapsed;
@@ -567,7 +577,7 @@ public sealed class TranslationText : ScrollingTextHost
     /// <summary>设置第二行文本。followProgress=true 时不启走马灯，
     /// 改由 ScrollToFraction 跟随原文逐字进度。</summary>
     public void SetText(string text, FontFamily family, double fontSizeDip, Brush foreground,
-        bool shadow, HorizontalAlignment align, bool followProgress)
+        bool shadow, bool blackShadow, HorizontalAlignment align, bool followProgress)
     {
         _align = align;
         _followProgress = followProgress;
@@ -579,7 +589,7 @@ public sealed class TranslationText : ScrollingTextHost
         _tb.LineHeight = Math.Ceiling(fontSizeDip * 1.3); // 与原文同规则固定行高，保留行间距
         _tb.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
         // 小字号用更轻的阴影，避免发虚；同样挂在 TextBlock 上（容器级会裁掉滚动尾部）
-        _tb.Effect = shadow ? TextShadow.Second : null;
+        _tb.Effect = shadow ? TextShadow.Second(blackShadow) : null;
         SetNaturalWidth(KaraokeText.MeasureTextWidth(text, family, fontSizeDip, DpiScale()));
     }
 
