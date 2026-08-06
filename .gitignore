@@ -5,3 +5,12 @@ wpf/TaskbarLyrics/publish/
 wpf/TaskbarLyrics/bin/
 wpf/TaskbarLyrics/obj/
 config.json
+
+# 运行期产物（跟着 config.json 落在 exe 同目录或 %AppData%\TaskbarLyrics）
+error.log
+lyrics-cache/
+
+# IDE
+.vs/
+.idea/
+*.user

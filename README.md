@@ -1,15 +1,24 @@
 # 任务栏歌词（Taskbar Lyrics）
 
+[![release](https://img.shields.io/github/v/release/ChissaQAQ/TaskbarLyrics?label=release)](https://github.com/ChissaQAQ/TaskbarLyrics/releases/latest)
+[![downloads](https://img.shields.io/github/downloads/ChissaQAQ/TaskbarLyrics/total?label=downloads)](https://github.com/ChissaQAQ/TaskbarLyrics/releases)
+[![build](https://github.com/ChissaQAQ/TaskbarLyrics/actions/workflows/build.yml/badge.svg)](https://github.com/ChissaQAQ/TaskbarLyrics/actions/workflows/build.yml)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 把网易云音乐当前播放歌曲的同步歌词，**原生显示在 Windows 任务栏里**
 （窗口是任务栏的子窗口，不是悬浮窗）。对标 Lyricify Lite 的视觉与动画体验。
 
-> WPF（.NET 10）实现：`wpf/publish/TaskbarLyrics.exe`，
-> 动画全部由 GPU 合成器渲染，丝滑不卡。
+> WPF（.NET 10）实现，单文件 exe（框架依赖，约 2MB）。
 
-## 使用方法
+## 下载
 
-双击 `wpf/publish/TaskbarLyrics.exe` 启动（无控制台窗口），然后用网易云音乐播放歌曲即可。
-需要 .NET 10 Desktop Runtime。
+到 [Releases](https://github.com/ChissaQAQ/TaskbarLyrics/releases/latest) 下载
+`TaskbarLyrics.exe`，双击即用（无控制台窗口、无需安装），然后用网易云音乐播放歌曲。
+
+前置条件只有一个：[.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0)。
+没装的话双击会弹提示并给出下载链接。
+
+历次改动见 [CHANGELOG.md](CHANGELOG.md)。
 
 ### 前提：播放器必须打开「系统媒体控件（SMTC）」上报
 
@@ -44,7 +53,8 @@
   - 外文歌：上行原文 + 下行译文（或罗马音，可关）
   - 中文歌（无译文）：上行当前句 + 下行下一句，切行时走"传送带"动画
     （下一句补位到上一行）
-- **切行动画**：旧句整行上滚、新句从下方滚入（三次缓出）
+- **切行动画**：旧句整行上滚淡出、新句从下方滚入，两行共用同一条缓动曲线与位移幅度
+  （看起来像一条传送带在动，而不是两件各自为政的事）
 - **悬停交互（对标 Lyricify）**
   - 悬停时浮现 Lyricify 式布局：封面 | ⏮ ▶ ⏭ | 歌名 + 歌手
   - 按钮列宽度展开动画，内容随之平滑右移；整窗淡白遮罩（同 Win11 任务栏图标）
@@ -58,10 +68,11 @@
 - **全屏自动隐藏**：前台有全屏应用（游戏/视频）时自动隐藏歌词（仅同显示器生效）
 - **单曲循环检测**：歌曲重播时歌词自动归零
 - **播放器黑名单**：默认不跟踪浏览器，可在设置中屏蔽/取消屏蔽当前播放器
-- **检查更新**：启动时自动检查新版本（可关），发现后一键更新
-  （下载 → 新进程接力替换 → 自动重启，配置保留）。
-  注意更新源是作者的内网 Gitea，**不在该内网时检查更新会失败**，
-  请到 [GitHub Releases](https://github.com/ChissaQAQ/TaskbarLyrics/releases) 手动下载覆盖
+- **检查更新**：启动时自动检查 [GitHub Releases](https://github.com/ChissaQAQ/TaskbarLyrics/releases)
+  上的新版本（可关），发现后一键更新
+  （下载 → 新进程接力替换 → 自动重启，配置保留）
+- **歌词磁盘缓存**：抓到的歌词与逐字表按歌落盘（30 天 / 上限 400 首），
+  切歌瞬间出词，断网时听过的歌照样有歌词（设置页可清空）
 - **锁定位置**：锁定后鼠标穿透，完全不干扰操作（通过托盘菜单解锁）
 - **系统托盘**：右下角托盘图标，菜单与歌词条右键一致
 - 所有设置保存在 exe 同目录的 `config.json`，删除即恢复默认
@@ -86,9 +97,45 @@
 
 ```powershell
 dotnet build wpf/TaskbarLyrics -c Release
+
+# 打包前先停掉正在跑的实例，否则单文件 exe 被占用会报 MSB4018
+Stop-Process -Name TaskbarLyrics -Force -ErrorAction SilentlyContinue
 dotnet publish wpf/TaskbarLyrics -c Release -r win-x64 --self-contained false `
   -p:PublishSingleFile=true -o wpf/publish
 
-# 歌词抓取控制台验证
-wpf/publish/TaskbarLyrics.exe --lyrics-test "歌名" "歌手"
+# 歌词抓取控制台验证（不走缓存，直接打真实抓取结果和译文覆盖率）
+wpf/publish/TaskbarLyrics.exe --lyrics-test "歌名" "歌手" [translation|romaji|off]
 ```
+
+代码在 `wpf/TaskbarLyrics/`，按职责分文件：
+
+| 文件 | 职责 |
+| --- | --- |
+| `MainController.cs` | 50ms 主节拍：读 SMTC → 定位当前行 → 推给渲染层 |
+| `SmtcListener.cs` | 系统媒体控件监听（网易云不报进度，本地计时推算） |
+| `Lyrics.cs` | 三家曲库抓取、候选择优、译文/罗马音与逐字（KRC）对齐 |
+| `LyricsCache.cs` | 歌词磁盘缓存（键里带 schema 版本，算法一改旧条目自动失联） |
+| `OverlayWindow.xaml(.cs)` | 歌词渲染、逐字扫过、滚动与切行动画 |
+| `NativeMethods.cs` | 任务栏挂靠（`SetParent`）、z-order 断言、点击穿透 |
+| `TaskbarFreeSpace.cs` | UIA 枚举任务栏元素，算出可用空档（自动避让） |
+| `SettingsWindow.xaml(.cs)` / `TrayIcon.cs` / `AppConfig.cs` | 设置界面、托盘菜单、配置存取 |
+| `Updater.cs` | 检查 GitHub Releases 并接力替换自身 |
+
+代码里的注释以「**为什么这么写**」为主（尤其是各种 Windows 平台坑的成因），
+改动前建议先读相关注释 —— 很多看起来多余的写法都是踩过坑之后的结果。
+
+## 反馈
+
+用着有问题欢迎提 [Issue](https://github.com/ChissaQAQ/TaskbarLyrics/issues)。
+提之前麻烦确认两件事，能省一轮来回：
+
+1. SMTC 开关是通的（见上文自查方法）
+2. 附上程序版本、Windows 版本、播放器版本；歌词相关的问题请**带上歌名和歌手**
+
+## 许可与免责
+
+代码以 [MIT](LICENSE) 许可发布。
+
+歌词数据来自网易云音乐、QQ 音乐、LRCLIB、酷狗的公开接口，**版权归各自权利方所有**。
+本程序只做展示、不存储分发歌词内容（本地缓存仅为减少重复请求，30 天后自动过期），
+仅供个人学习与日常听歌使用。

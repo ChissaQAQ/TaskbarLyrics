@@ -1,0 +1,34 @@
+# 编译验证：确认任何人 clone 下来都能直接 build 出 exe。
+# 只跑 build/publish 不跑测试——这个项目的行为几乎全在 Win11 任务栏的真实
+# 窗口层级和 SMTC 上，CI runner 里没有可验的东西，硬凑单测只会给假安全感。
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: 编译
+        run: dotnet build wpf/TaskbarLyrics -c Release
+
+      # 与 README / 发布用的命令保持一致：框架依赖单文件（不自包含，约 25MB→2MB）
+      - name: 打包
+        run: >
+          dotnet publish wpf/TaskbarLyrics -c Release -r win-x64
+          --self-contained false -p:PublishSingleFile=true -o publish
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TaskbarLyrics-win-x64
+          path: publish/TaskbarLyrics.exe

@@ -1,0 +1,66 @@
+name: Bug 反馈
+description: 歌词不显示、歌词抓错、显示异常、程序退出等
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **提交前请先自查两件事**，能省掉一轮来回：
+
+        1. 播放器的「系统媒体控件（SMTC）」开关有没有打开。播放时按一下音量键，
+           系统弹出的媒体浮层里能看到歌名 / 歌手 / 封面才算通 —— 看不到的话
+           任务栏这边什么都收不到，详见 [README](../#前提播放器必须打开系统媒体控件smtc上报)。
+        2. exe 同目录（或 `%AppData%\TaskbarLyrics`）下的 `error.log` 有没有内容。
+
+  - type: input
+    id: version
+    attributes:
+      label: 程序版本
+      description: 右键歌词条 →「打开设置…」→「关于」页可以看到
+      placeholder: 1.0.22
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Windows 版本
+      description: Win + R 输入 winver
+      placeholder: Windows 11 24H2 (26100.4061)
+    validations:
+      required: true
+
+  - type: input
+    id: player
+    attributes:
+      label: 播放器及版本
+      placeholder: 网易云音乐 3.1.2
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 问题现象
+      description: |
+        出现在什么时候（切歌时 / 悬停时 / 长时间运行后 / 一直如此），以及期望的表现是什么。
+        任务栏截图非常有帮助，可以直接拖进来。
+    validations:
+      required: true
+
+  - type: input
+    id: song
+    attributes:
+      label: 相关歌曲
+      description: |
+        歌词抓错、逐字不对、没有译文这类问题**请务必填**（歌名 + 歌手）——
+        它们几乎都跟具体某首歌的曲库数据有关，有歌名才能用
+        `TaskbarLyrics.exe --lyrics-test "歌名" "歌手"` 复现。
+      placeholder: Bi-Li-Li Emotion / 高橋洋子
+
+  - type: textarea
+    id: log
+    attributes:
+      label: error.log 内容
+      description: 有就贴上来，没有留空
+      render: text
