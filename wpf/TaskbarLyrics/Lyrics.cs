@@ -200,15 +200,16 @@ public static partial class Lyrics
             .ThenBy(x => x.DurDiff)
             .ToList();
         var ordered = PreferArtistMatched(scored, x => x.Artist)
-            .Select(x => x.Song)
+            .Select(x => (x.Song, x.Ts))
             .ToList();
         // 候选逐个尝试：同一首歌常有多个版本，
         // 有的版本没译文（主人反馈网易云明显有译文却显示不出来），优先带译文的版本
         if (ordered.Count == 0) return null;
         SourceResult? firstResult = null;
         SourceResult? bestTrans = null;
-        var bestCovered = 0;
-        foreach (var cand in ordered.Take(3))
+        var bestTs = -1;
+        var bestRatio = -1.0;
+        foreach (var (cand, ts) in ordered.Take(3))
         {
             var id = cand.GetProperty("id").GetInt64();
             JsonDocument lyric;
@@ -255,16 +256,26 @@ public static partial class Lyrics
                 var picked = new SourceResult(merged, DurOf(cand));
                 firstResult ??= picked;
                 if (secondLine == "off") return picked;
-                // 比较各候选的译文覆盖行数，取最多的那个——不能「见到任意一行译文就走」。
+                // 比较各候选的译文覆盖情况，取最好的那个——不能「见到任意一行译文就走」。
                 // 网易云上「只翻译了副歌」的残缺条目非常常见，撞上它时前几句、间奏后
                 // 都是空的，用户看到的就是「偶尔有几句少了翻译」；而搜索结果顺序会随
                 // 热度和索引更新变动，所以同一首歌换个时间抓可能好可能坏，像是随机的。
-                // 全覆盖就立刻收工，不白打后面候选的接口
-                var covered = merged.Count(l => l.Trans != null);
-                if (covered == merged.Count) return picked;
-                if (covered > bestCovered)
+                //
+                // 歌名分数必须排在覆盖率前面，否则择优会把前面的排序整个推翻：
+                // 比覆盖「行数」时，长一倍的 Live 版光靠行数多就能赢过录音室版
+                // （实测「居眠り遠征隊」：录音室版 45 行 43 行有译文，Live 版 102 行
+                //  100 行有译文，抓回来的整首都是 Live 的即兴口白）。
+                // 而且这两道闸平时的兜底——时长差与「歌词比歌长」——在网易云上双双失效：
+                // 它的 SMTC 完全不上报 timeline，durationS 恒为 0，两处判断直接短路。
+                // 覆盖率也必须用比率而不是行数：本意只是「别挑到残缺翻译」，比率就够了
+                var ratio = merged.Count == 0 ? 0 : merged.Count(l => l.Trans != null) / (double)merged.Count;
+                // 歌名满分且译文全覆盖才立刻收工，不白打后面候选的接口。
+                // 只看全覆盖是不够的：Live 版也可能全覆盖，先返回就再也轮不到正确的那首
+                if (ts >= 2 && ratio >= 1) return picked;
+                if (ts > bestTs || (ts == bestTs && ratio > bestRatio))
                 {
-                    bestCovered = covered;
+                    bestTs = ts;
+                    bestRatio = ratio;
                     bestTrans = picked;
                 }
             }
