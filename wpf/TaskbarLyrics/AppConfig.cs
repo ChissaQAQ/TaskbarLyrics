@@ -57,8 +57,10 @@ public sealed class AppConfig
 
     /// <summary>当前使用的配置文件路径。首选 exe 同目录（便携、删掉即恢复默认），
     /// 那里写不进去时会切到 <see cref="FallbackPath"/>。</summary>
-    public static string ConfigPath { get; private set; } =
-        Path.Combine(AppContext.BaseDirectory, "config.json");
+    public static string ConfigPath { get; private set; } = PrimaryPath;
+
+    /// <summary>首选位置：exe 同目录。</summary>
+    private static string PrimaryPath => Path.Combine(AppContext.BaseDirectory, "config.json");
 
     /// <summary>exe 同目录只读时（装在 Program Files、或从只读介质运行）的退路。</summary>
     private static string FallbackPath => Path.Combine(
@@ -71,36 +73,87 @@ public sealed class AppConfig
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping, // 对应 Python ensure_ascii=False
     };
 
+    /// <summary>读配置。两处（exe 同目录 / %AppData% 退路）都可能有内容，
+    /// 取较新的那份；它坏了再退到另一份。<see cref="ConfigPath"/> 随之定下，
+    /// 之后的存盘就写这一处。</summary>
     public static AppConfig Load()
     {
-        AppConfig? cfg = null;
-        // exe 同目录优先；没有就看退路——上次可能因为目录只读存到那边去了
-        if (!File.Exists(ConfigPath) && File.Exists(FallbackPath)) ConfigPath = FallbackPath;
+        var first = PickReadPath();
+        var second = first == PrimaryPath ? FallbackPath : PrimaryPath;
+        if (TryLoadFrom(first, out var cfg)) { ConfigPath = first; return cfg; }
+        // 首选那份坏了（已被隔离成 .bad），另一处哪怕旧一点也比全默认值强
+        if (TryLoadFrom(second, out cfg)) { ConfigPath = second; return cfg; }
+        // 两处都没有（首次运行）或都坏了：用默认值，并按便携优先写回 exe 同目录，
+        // 那里写不进去时 Save 会自己切到退路
+        ConfigPath = PrimaryPath;
+        return new AppConfig();
+    }
+
+    /// <summary>决定这次从哪读。
+    ///
+    /// 必须比较两处的新旧，不能固定优先 exe 同目录：Save 在 exe 同目录写不进去时
+    /// 会转存 %AppData%，而原先的 Load 只在 exe 同目录「不存在」文件时才看退路。
+    /// 读写规则一不对称，存进去的和读回来的就不是同一个文件——现象是
+    /// 「设置改完当场生效、电脑重启后又变回旧值」，而且全程不留痕迹
+    /// （转存退路成功时不提示，写失败的日志也只记第一次）。
+    ///
+    /// 触发它不需要权限长期不足：OneDrive 同步、杀软扫描、备份工具短暂锁住
+    /// config.json 就够了。而 ConfigPath 一旦切到退路，本次运行就不再回头试
+    /// exe 同目录，于是那一次抖动之后的所有改动都注定在重启时丢失。</summary>
+    private static string PickReadPath()
+    {
+        var primary = PrimaryPath;
+        var fallback = FallbackPath;
         try
         {
-            if (File.Exists(ConfigPath))
-            {
-                var text = File.ReadAllText(ConfigPath);
-                var node = JsonNode.Parse(text)?.AsObject();
-                if (node != null)
-                {
-                    // 旧配置迁移：show_translation 布尔 → second_line 枚举
-                    if (node.ContainsKey("show_translation") && !node.ContainsKey("second_line"))
-                    {
-                        var old = node["show_translation"];
-                        node["second_line"] = old is JsonValue v && v.TryGetValue<bool>(out var b) && b
-                            ? "translation" : "off";
-                    }
-                    node.Remove("show_translation");
-                    cfg = node.Deserialize<AppConfig>();
-                }
-            }
+            var ff = new FileInfo(fallback);
+            if (!ff.Exists) return primary;
+            var pf = new FileInfo(primary);
+            if (!pf.Exists) return fallback;
+            // 都有：谁新用谁。一样新时选 exe 同目录，保持便携语义
+            return ff.LastWriteTimeUtc > pf.LastWriteTimeUtc ? fallback : primary;
         }
         catch
         {
-            cfg = null; // 配置损坏时用默认值
+            return primary; // 取不到时间戳（路径异常）就按首选来
         }
-        return cfg ?? new AppConfig();
+    }
+
+    /// <summary>试着从一处读。文件不存在返回 false（不算故障）；
+    /// 内容坏了则记日志并把它隔离成 .bad 再返回 false。
+    ///
+    /// 隔离这一步是必须的：解析失败原先只是静默回到默认值，而回默认只发生在内存里，
+    /// 紧接着任何一次存盘（拖动窗口松手、检查更新写时间戳）就会把整份默认值
+    /// 覆盖到原文件上，用户攒下的设置从此不可恢复。改名留证之后，
+    /// 坏文件既不会被覆盖，也让下一次 Load 有机会退到另一处那份旧配置。</summary>
+    private static bool TryLoadFrom(string path, out AppConfig cfg)
+    {
+        cfg = null!;
+        if (!File.Exists(path)) return false;
+        try
+        {
+            var node = JsonNode.Parse(File.ReadAllText(path))?.AsObject()
+                ?? throw new InvalidDataException("配置内容不是 JSON 对象");
+            // 旧配置迁移：show_translation 布尔 → second_line 枚举
+            if (node.ContainsKey("show_translation") && !node.ContainsKey("second_line"))
+            {
+                var old = node["show_translation"];
+                node["second_line"] = old is JsonValue v && v.TryGetValue<bool>(out var b) && b
+                    ? "translation" : "off";
+            }
+            node.Remove("show_translation");
+            cfg = node.Deserialize<AppConfig>()
+                ?? throw new InvalidDataException("配置反序列化结果为空");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // 不记的话，用户看到的只是「设置全变回默认了」，事后无从下手
+            Log.Error("config-load", ex);
+            try { File.Move(path, path + ".bad", overwrite: true); }
+            catch { /* 挪不动就算了，日志里已经留了一条 */ }
+            return false;
+        }
     }
 
     private static bool _writeLogged;
@@ -116,6 +169,10 @@ public sealed class AppConfig
         if (!string.Equals(ConfigPath, fallback, StringComparison.OrdinalIgnoreCase)
             && TryWrite(fallback))
         {
+            // 留一条：这条路以前完全静默，而它意味着配置从此存在 %AppData%，
+            // 用户以为「删掉 exe 同目录的 config.json 就恢复默认」时会对不上账。
+            // 不弹窗——设置确实存住了，功能正常，Load 现在也会跟着读较新的那份
+            Log.Note("config-save", $"exe 同目录写不进去，配置已转存到 {fallback}");
             ConfigPath = fallback; // 之后一直用退路，下次 Load 也会从那里读
             return true;
         }
@@ -128,7 +185,12 @@ public sealed class AppConfig
         {
             var dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-            File.WriteAllText(path, JsonSerializer.Serialize(this, JsonOptions));
+            // 先写临时文件再原子改名。直接覆写的话，写一半遇上关机/断电/杀进程
+            // 就留下一份半截 JSON，而解析失败的代价是整份设置回默认值
+            // （LyricsCache 那边踩过同一个坑，解法也是这个）
+            var tmp = path + ".tmp";
+            File.WriteAllText(tmp, JsonSerializer.Serialize(this, JsonOptions));
+            File.Move(tmp, path, overwrite: true);
             return true;
         }
         catch (Exception ex)
