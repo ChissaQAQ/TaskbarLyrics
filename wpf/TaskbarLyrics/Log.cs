@@ -16,6 +16,14 @@ internal static class Log
     /// <summary>记一条异常。tag 标明来源（dispatcher / appdomain / task）。
     /// 日志本身写失败（目录只读、磁盘满）绝不能反过来把程序搞挂，全部吞掉。</summary>
     public static void Error(string tag, Exception? ex)
+        => Write(tag, ex?.ToString() ?? "(无异常对象)");
+
+    /// <summary>记一条没有异常对象的异常状况。
+    /// 有些故障不以异常的形式出现——比如某个后台查询从此不再返回结果，
+    /// 功能静默降级、用户看到的只是「位置不对」。这类现场同样只有写下来才查得到。</summary>
+    public static void Note(string tag, string message) => Write(tag, message);
+
+    private static void Write(string tag, string body)
     {
         try
         {
@@ -26,7 +34,7 @@ internal static class Log
                 var sb = new StringBuilder();
                 sb.Append('[').Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"))
                   .Append("] ").Append(tag).Append(": ");
-                sb.AppendLine(ex?.ToString() ?? "(无异常对象)");
+                sb.AppendLine(body);
                 File.AppendAllText(LogPath, sb.ToString(), Encoding.UTF8);
             }
         }
