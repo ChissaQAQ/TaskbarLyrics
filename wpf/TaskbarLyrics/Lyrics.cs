@@ -524,8 +524,17 @@ public static partial class Lyrics
     }
 
     private const double MinTextSim = 0.6;    // 配对所需的文本相似度下限
-    private const double MinMergedSim = 0.8;  // 一对二/二对一合并配对的下限（拼回来该几乎逐字相同）
+    private const double MinMergedSim = 0.8;  // 一对多/多对一合并配对的下限（拼回来该几乎逐字相同）
     private const int MaxLineShiftMs = 3000;  // 扣除全局偏移后仍允许的行首时间差
+    // 一个主歌词行最多认领几个连续的 KRC 行。原先只算两行，而酷狗对「A（A）」这种
+    // 括注重复句常拆到四行（实测 KICK BACK「ハッピー ラッキー こんにちはベイビー
+    // (ハッピー ラッキー こんにちはベイビー)」拆成 4 行）：单行比整句连 MinTextSim
+    // 都摸不到（上限 2×9/47 = 0.38），两行拼起来也够不到 MinMergedSim，于是整句
+    // 一行都配不上——原文被切成四行显示，译文一条都挂不上。
+    // 封在 4 是因为再往上就得靠 MinMergedSim 独自兜着了，而拼进来的行越多，
+    // 「凑巧凑够相似度」的风险越大
+    private const int MaxKrcSpan = 4;
+
     // 「主歌词是译文、KRC 是原文」的识别阈值（见 TryAlignAsTranslated）
     private const double MaxKanaHangulRatio = 0.02; // 主歌词侧作为中文译文的假名/谚文上限
     private const double MinHanRatio = 0.5;         // 且汉字得占一半以上（否则那是英文原文）
@@ -537,12 +546,14 @@ public static partial class Lyrics
     /// <summary>两段归一化文本的相似度：2×最长公共子序列长度 / 两者总长（0~1，1 为完全相同）。
     /// 用子序列而不是编辑距离：两个曲库的差异多是多字/少字（和声括注、语气词、断句不同），
     /// 子序列对插入删除更宽容，而「整行其实是另一句」照样只能拿到低分。</summary>
-    private static double Similarity(string a, string b)
+    /// <param name="floor">低于这个数就不必算出准确值，直接返回 0（省掉 O(nm) 的 DP）。
+    /// 需要拿两个都够不到门槛的分数比大小时传 0——那时返回 0 会让两边都成 0、比不出来。</param>
+    private static double Similarity(string a, string b, double floor = MinTextSim)
     {
         if (a == b) return 1.0;
         if (a.Length == 0 || b.Length == 0) return 0.0;
         // 相似度上限就是 2×短的/总长，够不到门槛就不必跑 O(nm) 的 DP
-        if (2.0 * Math.Min(a.Length, b.Length) / (a.Length + b.Length) < MinTextSim) return 0.0;
+        if (2.0 * Math.Min(a.Length, b.Length) / (a.Length + b.Length) < floor) return 0.0;
         var prev = new int[b.Length + 1];
         var cur = new int[b.Length + 1];
         for (var i = 1; i <= a.Length; i++)
@@ -614,11 +625,11 @@ public static partial class Lyrics
         diffs.Sort();
         var offset = diffs.Count > 0 ? diffs[diffs.Count / 2] : 0;
 
-        // 配对得分矩阵（0 = 不允许配对）。除 1:1 外还算「一个主行 ↔ 相邻两个 KRC 行」与
-        // 「相邻两个主行 ↔ 一个 KRC 行」：两个曲库对同一首歌的断句粒度常不同——KRC 按「唱的
-        // 断句」把一句拆成两行，或反过来把两句并成一行。严格 1:1 时这些行整片落空，
-        // 且相似度还会双双跌破阈值（Lemon 首句：网易云一行 16 字、KRC 拆成 4+12 两行，
-        // 单看任一半的相似度只有 0.4）
+        // 配对得分矩阵（0 = 不允许配对）。除 1:1 外还算「一个主行 ↔ 相邻 k 个 KRC 行」
+        // （k 到 MaxKrcSpan）与「相邻两个主行 ↔ 一个 KRC 行」：两个曲库对同一首歌的断句
+        // 粒度常不同——KRC 按「唱的断句」把一句拆成好几行，或反过来把两句并成一行。
+        // 严格 1:1 时这些行整片落空，且相似度还会双双跌破阈值（Lemon 首句：网易云一行
+        // 16 字、KRC 拆成 4+12 两行，单看任一半的相似度只有 0.4）
         double Score(string a, int aMs, string b, int bMs, double min)
         {
             if (a.Length == 0 || b.Length == 0) return 0;
@@ -628,7 +639,8 @@ public static partial class Lyrics
         }
 
         var sim = new double[n, m];    // main[i] ↔ krc[j]
-        var sim1x2 = new double[n, m]; // main[i] ↔ krc[j-1] + krc[j]
+        // main[i] ↔ krc[j-k+1..j]（往前接 k 行，k 从 2 起，[.., 0] 与 [.., 1] 不用）
+        var simSpan = new double[n, m, MaxKrcSpan + 1];
         var sim2x1 = new double[n, m]; // main[i-1] + main[i] ↔ krc[j]
         for (var i = 0; i < n; i++)
         {
@@ -638,9 +650,16 @@ public static partial class Lyrics
                     normKrc[j], krcLines[j].StartMs, MinTextSim);
                 // 合并只认高相似度：拆行拼回来本该几乎逐字相同，阈值松了会把
                 // 一句歌词旁边那行无关的短句也一起吞进来
-                if (j > 0)
-                    sim1x2[i, j] = Score(normMain[i], mainLines[i].Ms,
-                        normKrc[j - 1] + normKrc[j], krcLines[j - 1].StartMs, MinMergedSim);
+                var cat = normKrc[j];
+                for (var k = 2; k <= MaxKrcSpan && j - k + 1 >= 0; k++)
+                {
+                    cat = normKrc[j - k + 1] + cat;
+                    // 拼过头就不必再往前接：相似度上限是 2×短的/总长，拼接串一旦超过
+                    // 主行长度的 1.5 倍这个上限就跌破 0.8，而 cat 只会越接越长
+                    if (cat.Length * 2 > normMain[i].Length * 3) break;
+                    simSpan[i, j, k] = Score(normMain[i], mainLines[i].Ms,
+                        cat, krcLines[j - k + 1].StartMs, MinMergedSim);
+                }
                 if (i > 0)
                     sim2x1[i, j] = Score(normMain[i - 1] + normMain[i], mainLines[i - 1].Ms,
                         normKrc[j], krcLines[j].StartMs, MinMergedSim);
@@ -657,10 +676,11 @@ public static partial class Lyrics
                 var best = Math.Max(dp[i - 1, j], dp[i, j - 1]);
                 var s = sim[i - 1, j - 1];
                 if (s > 0) best = Math.Max(best, dp[i - 1, j - 1] + s);
-                // 合并配对按「吃掉两行」记两份分：这样当那多出来的一行另有 1:1 的好归宿时，
-                // 「各配各的」总分更高，DP 会选它，合并只在那行本来无处可去时才发生
-                if (j > 1 && sim1x2[i - 1, j - 1] > 0)
-                    best = Math.Max(best, dp[i - 1, j - 2] + sim1x2[i - 1, j - 1] * 2);
+                // 合并配对按「吃掉 k 行」记 k 份分：这样当那些多出来的行另有 1:1 的好归宿时，
+                // 「各配各的」总分更高，DP 会选它，合并只在那些行本来无处可去时才发生
+                for (var k = 2; k <= MaxKrcSpan && j - k >= 0; k++)
+                    if (simSpan[i - 1, j - 1, k] > 0)
+                        best = Math.Max(best, dp[i - 1, j - k] + simSpan[i - 1, j - 1, k] * k);
                 if (i > 1 && sim2x1[i - 1, j - 1] > 0)
                     best = Math.Max(best, dp[i - 2, j - 1] + sim2x1[i - 1, j - 1] * 2);
                 dp[i, j] = best;
@@ -673,20 +693,31 @@ public static partial class Lyrics
         while (ii > 0 && jj > 0)
         {
             var s = sim[ii - 1, jj - 1];
-            var s12 = jj > 1 ? sim1x2[ii - 1, jj - 1] : 0;
             var s21 = ii > 1 ? sim2x1[ii - 1, jj - 1] : 0;
+            // 走的是「这个主行吃掉 k 个 KRC 行」的哪个 k（0 = 不走这条）。多个 k 同时与
+            // 最优值相等时取最小的那个：总分一样，而吞掉的行少，猜错的余地也小
+            var span = 0;
+            for (var k = 2; k <= MaxKrcSpan && jj - k >= 0; k++)
+            {
+                var sk = simSpan[ii - 1, jj - 1, k];
+                if (sk > 0 && dp[ii, jj] <= dp[ii - 1, jj - k] + sk * k + 1e-9)
+                {
+                    span = k;
+                    break;
+                }
+            }
             if (s > 0 && dp[ii, jj] <= dp[ii - 1, jj - 1] + s + 1e-9)
             {
                 pairs.Add((ii - 1, jj - 1));
                 ii--;
                 jj--;
             }
-            else if (s12 > 0 && dp[ii, jj] <= dp[ii - 1, jj - 2] + s12 * 2 + 1e-9)
+            else if (span > 0)
             {
-                pairs.Add((ii - 1, jj - 1));
-                pairs.Add((ii - 1, jj - 2));
+                // 按 KRC 下标递减加入，与 1:1 分支同向；最后整体 Reverse 成时间正序
+                for (var t = 0; t < span; t++) pairs.Add((ii - 1, jj - 1 - t));
                 ii--;
-                jj -= 2;
+                jj -= span;
             }
             else if (s21 > 0 && dp[ii, jj] <= dp[ii - 2, jj - 1] + s21 * 2 + 1e-9)
             {
@@ -866,7 +897,7 @@ public static partial class Lyrics
             // KRC 那行的字时间是相对它自己的行首的，挂到主歌词行上要补两行行首之差
             var shift = krcLines[j].StartMs - al.OffsetMs - mainLines[i].Ms;
             var words = ShiftWords(krcLines[j].Words, shift);
-            // 一对二（KRC 把这一句拆成两行唱）：两行字表接起来正好覆盖主行全文。
+            // 一对多（KRC 把这一句拆成好几行唱）：那几行的字表接起来正好覆盖主行全文。
             // 复制一份再接，ShiftWords 在 shift 为 0 时会把原 list 直接还回来
             if (karaoke.TryGetValue(mainLines[i].Ms, out var prev)) prev.AddRange(words);
             else karaoke[mainLines[i].Ms] = new List<KaraokeWord>(words);
@@ -905,19 +936,18 @@ public static partial class Lyrics
             else mainOf[j] = new List<int> { i };
         }
 
-        // 向后吸附：把「一对二里只认出一半」的那半找回来。
+        // 向后吸附：把「一句拆成两行、只认出后半」的那前半找回来。
         //
-        // KRC 常把主歌词的一句拆成两行唱，而两侧对同一个词的写法可能不同
+        // KRC 常把主歌词的一句拆成好几行唱，而两侧对同一个词的写法可能不同
         // （实测 Superfly「Bi-Li-Li Emotion」：KRC 写「諸行無常ね ジーザス」，
         // 主歌词写「諸行無常ね、Jesus! 全てはフェイドアウト」——片假名对拉丁字母）。
         // 于是只有后半句文本对得上，前半句一行配不到任何主行，krcsOf 里那句就只有
-        // 一个 KRC 行、凑不满「一对二」的门槛，下面的合并逻辑不接管，这行就空着译文，
+        // 一个 KRC 行、凑不满合并的门槛，下面的合并逻辑不接管，这行就空着译文，
         // 显示上退化成「第二行显示下一句」——主人看到的正是这一幕。
         //
-        // 判据不能再靠文本（它已经失手了），改用时间：主行的行首时间几乎就等于
-        // 这一行的行首、且明显比下一行更近，说明这句主歌词从这一行就开始唱了。
-        // 三道闸一起卡（主行只配到一个 KRC 行、主行有译文、时间差 < 1.5s 且更近），
-        // 错吸的代价才不会大于收益。
+        // 判据不能再靠相似度门槛（它已经失手了），改用时间加一道相对文本闸：主行的
+        // 行首时间几乎就等于这一行的行首、且明显比下一行更近，说明这句主歌词从这一行
+        // 就开始唱了；再要求「并起来比原先更像主歌词那句」挡住误吸（见下面的文本闸）。
         for (var j = 0; j < krcLines.Count - 1; j++)
         {
             if (mainOf.ContainsKey(j)) continue;                 // 本来就配上了
@@ -927,6 +957,18 @@ public static partial class Lyrics
             var mainMs = mainLines[i].Ms + al.OffsetMs;          // 换到 KRC 时间轴
             var dj = Math.Abs(mainMs - krcLines[j].StartMs);
             if (dj > 1500 || dj >= Math.Abs(mainMs - krcLines[j + 1].StartMs)) continue;
+            // 文本闸：吸附等于把这两行并成一行显示，那么拼起来必须比原先那一行更像
+            // 主歌词这一句。光靠时间会误吸——实测 KICK BACK 有一句主歌词被 KRC 拆成
+            // 四行（MaxKrcSpan 之前四行全落空），其中末行到隔壁那句主歌词的行首只差
+            // 10ms，比到它自己那句的 320ms 还近，上面三道闸全过，结果把两句毫不相干
+            // 的歌词粘成一行、逐字字表也跟着串。
+            // 比大小得用真实相似度（floor 传 0）：吸附本就是给「文本相似度失手」兜底的，
+            // 两边都够不到 MinTextSim 是常态，按门槛算会双双归零、比不出高下
+            var mainNorm = NormalizeForMatch(mainLines[i].Text);
+            var alone = Similarity(mainNorm, NormalizeForMatch(krcLines[j + 1].Plain), 0);
+            var joined = Similarity(mainNorm,
+                NormalizeForMatch(krcLines[j].Plain) + NormalizeForMatch(krcLines[j + 1].Plain), 0);
+            if (joined <= alone) continue;
             krcsOf[i].Add(j);
             mainOf[j] = new List<int> { i };
             // 译文按 KRC 行索引存，而吸附进来的这行排在前面、会成为合并后的组首
@@ -934,9 +976,9 @@ public static partial class Lyrics
             transOf[j] = mainLines[i].Trans!;
         }
 
-        // 一对二（KRC 把主歌词的一句拆成两行唱）且这句有译文时，把这两行并回一行显示。
-        // 不并的话两行都挂着同一条译文，同一句翻译连着出现两遍，看着像卡带重复了；
-        // 而按字数把译文切两半纯属猜。并回去不损失逐字——字表接起来正好覆盖这一整句。
+        // 一对多（KRC 把主歌词的一句拆成好几行唱）且这句有译文时，把那几行并回一行显示。
+        // 不并的话每行都挂着同一条译文，同一句翻译连着出现好几遍，看着像卡带重复了；
+        // 而按字数把译文切成几段纯属猜。并回去不损失逐字——字表接起来正好覆盖这一整句。
         // 没译文的歌不并：KRC 的细断句本身更好读，行更短也更不容易触发横向滚动
         var groupOf = new Dictionary<int, List<int>>(); // 组首 KRC 行 -> 组内全部行
         var headOf = new Dictionary<int, int>();        // 组内任一行 -> 组首行
