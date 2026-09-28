@@ -5,6 +5,7 @@
 // SMTC 的进度只在切歌/暂停/拖动时刷新，播放中由 CurrentPositionS() 本地插值。
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Windows.Media.Control;
 using Windows.Storage.Streams;
 // 类型名太长，且要在元组签名里出现
@@ -12,11 +13,64 @@ using MediaProps = Windows.Media.Control.GlobalSystemMediaTransportControlsSessi
 
 namespace TaskbarLyrics;
 
-/// <summary>单调时钟（对应 Python time.monotonic）。</summary>
+/// <summary>单调时钟（对应 Python time.monotonic），不含系统睡眠/休眠的时长。</summary>
 public static class Clock
 {
+    // 播放进度是「基准 + 流逝时间」推算出来的，时钟必须跟着音频一起停。
+    // 原先用的 Stopwatch 底层是 QPC，微软文档写明它把睡眠、休眠、connected standby
+    // 的时间都算在内：合盖一晚醒来，推算进度凭空多出一整夜，歌词直接跳到末尾，
+    // 主程序还会据此误判成单曲循环重播去归位。
+    // 没在轮询里靠「两次轮询间隔过长」去猜睡眠，是因为猜不准也来不及：界面节拍
+    // 醒来后往往先于轮询跑，已经拿着多出一夜的进度去做重播归位了；而轮询本身因为
+    // 跨进程调用慢、进程被挂起等原因拖长时，音乐其实一直在放，冻结进度反而会落后。
+    // unbiased interrupt time 只在系统处于工作状态时走，从根上把睡眠排除掉；
+    // Precise 版直接读计时硬件，精度与 QPC 相当，逐字进度不会因此变粗。
+    // Precise 版不在 kernel32.dll 里（实测 EntryPointNotFoundException），是 KernelBase
+    // 经 api-ms-win-core-realtime-l1-1-1 导出的；取不到（Windows 10 之前）再退到 kernel32
+    // 的非 Precise 版（Win7 起就有，精度随时钟中断，进程已 timeBeginPeriod(1)，约 1ms），
+    // 两个都取不到才退回 Stopwatch。
+    [DllImport("api-ms-win-core-realtime-l1-1-1.dll", EntryPoint = "QueryUnbiasedInterruptTimePrecise")]
+    private static extern void QueryUnbiasedInterruptTimePrecise(out ulong unbiasedTime);
+
+    [DllImport("kernel32.dll", EntryPoint = "QueryUnbiasedInterruptTime")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryUnbiasedInterruptTime(out ulong unbiasedTime);
+
     private static readonly Stopwatch Sw = Stopwatch.StartNew();
-    public static double Now => Sw.Elapsed.TotalSeconds;
+    private static readonly int Mode; // 0 = Stopwatch，1 = Precise，2 = 非 Precise
+    private static readonly ulong Origin; // 让读数和原来一样从进程启动时的 0 起算
+
+    static Clock()
+    {
+        // 这里一律吞掉——静态构造抛出去会变成 TypeInitializationException，
+        // 所有用到 Clock 的地方都跟着挂
+        try
+        {
+            QueryUnbiasedInterruptTimePrecise(out Origin);
+            Mode = 1;
+            return;
+        }
+        catch { }
+        try
+        {
+            if (QueryUnbiasedInterruptTime(out Origin)) { Mode = 2; return; }
+        }
+        catch { }
+        try { Log.Note("clock", "取不到 unbiased interrupt time，退回 Stopwatch（会计入系统睡眠时长）"); }
+        catch { }
+    }
+
+    public static double Now
+    {
+        get
+        {
+            ulong t;
+            if (Mode == 1) QueryUnbiasedInterruptTimePrecise(out t);
+            else if (Mode == 2) QueryUnbiasedInterruptTime(out t);
+            else return Sw.Elapsed.TotalSeconds;
+            return (t - Origin) / 1e7; // 单位是 100ns
+        }
+    }
 }
 
 public sealed class PlaybackState
@@ -67,6 +121,13 @@ public static class SmtcListener
     public const double PollIntervalS = 0.5;   // 兜底轮询；事件到达会立即刷新
     public const double SmtcLatencyS = 0.45;   // 网易云上报暂停/恢复的固有延迟（实测均值 0.42~0.56s）
     private const int MaxThumbTries = 8;       // 每首歌读封面的次数上限（约覆盖切歌后 4s）
+    // 进度基准按来源保存的有效期（见 PollAsync 里的 bases）。在播的基准离开越久越不可信
+    // （期间可能暂停过而没人看见），只留一小会儿；停着的基准不随时间漂移，可以留得久些
+    private const double PlayingBaseKeepS = 30;
+    private const double PausedBaseKeepS = 600;
+    private const double RetryMinS = 1;        // 获取 SMTC manager 失败后的退避：1s 起步、逐次翻倍
+    private const double RetryMaxS = 30;       // 退避上限
+    private const int ManagerMaxFails = 3;     // manager 连续调用失败几次就丢掉重新获取
 
     // ---- 播放控制 ----
 
@@ -205,7 +266,11 @@ public static class SmtcListener
     public static async Task PollAsync(Action<PlaybackState?> onState, CancellationToken stop,
         Func<string> getSource, Func<List<string>> getBlocklist)
     {
-        var manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
+        // manager 在循环里获取：原先放在 try 外面，RequestAsync 抛一次异常（开机自启时
+        // 系统媒体服务还没就绪之类），整个监听任务就此结束，再也不会自愈
+        GlobalSystemMediaTransportControlsSessionManager? manager = null;
+        var acquireFails = 0;     // 连续没能拿到可用 manager 的次数（决定退避时长）
+        var managerFails = 0;     // manager.GetSessions 连续失败次数
         GlobalSystemMediaTransportControlsSession? session = null;
         string sessionKey = "";   // 已订阅事件的会话标识（AUMID）
         TaskCompletionSource? wake = null;
@@ -226,7 +291,44 @@ public static class SmtcListener
         void OnPlaybackInfoChanged(GlobalSystemMediaTransportControlsSession s, PlaybackInfoChangedEventArgs a) => Wake();
         void OnMediaPropertiesChanged(GlobalSystemMediaTransportControlsSession s, MediaPropertiesChangedEventArgs a) => Wake();
 
-        PlaybackState? prev = null;
+        // 进度基准按来源（AUMID）分别保存，值是 (该来源最近一次的状态, 读到它的时刻)。
+        // 原先只有一个 prev 且每轮无条件覆盖：SMTC 读失败一次（state 为 null）、会话瞬断、
+        // auto 模式临时切去别的播放器，基准都会丢，网易云这种 raw 恒为 0 的就从头算起。
+        // 存的就是发给主程序的那个对象：主程序判出单曲循环重播时会直接改它的基准，
+        // 下一轮得接着改过的值推算。条目数不超过见过的播放器个数，过期的不必清理，
+        // 查的时候当它不存在、同源下次写入时覆盖即可
+        var bases = new Dictionary<string, (PlaybackState State, double SeenAt)>();
+
+        // 换走的会话若确实停着，把它的基准冻结在此刻。auto 模式只有网易云不在播时才会
+        // 换去别的播放器，而换走那一轮读的是新会话，旧会话「停了」这件事没人看见——
+        // 不冻结的话它的基准一直按在播推算，等它恢复播放切回来时，停了多久进度就超前多久。
+        // 状态读不出来（会话已销毁）不冻结：多半是瞬断，接着推算更接近实情
+        void FreezeIfPaused(GlobalSystemMediaTransportControlsSession old, string sid)
+        {
+            if (!bases.TryGetValue(sid, out var entry) || !entry.State.Playing) return;
+            // 已过期的在播基准读取处本就不再合并：这里也不冻结、不续命，免得按旧基准推算出虚高进度
+            if (Clock.Now - entry.SeenAt > PlayingBaseKeepS) return;
+            try
+            {
+                if (old.GetPlaybackInfo().PlaybackStatus
+                    == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing) return;
+            }
+            catch { return; }
+            var s = entry.State;
+            bases[sid] = (new PlaybackState
+            {
+                Title = s.Title,
+                Artist = s.Artist,
+                DurationS = s.DurationS,
+                SourceId = s.SourceId,
+                RawPositionS = s.RawPositionS,
+                // 与正常观察到暂停时一样回退固有延迟，切回来恢复播放时会对称补回
+                BasePositionS = Math.Max(0.0, s.CurrentPositionS() - SmtcLatencyS),
+                BaseTime = Clock.Now,
+                Playing = false,
+            }, Clock.Now);
+        }
+
         string thumbKey = "";      // 已读封面的歌曲
         byte[]? thumbBytes = null; // 当前歌曲的封面字节
         double thumbRefreshUntil = 0;  // 切歌后的封面重读窗口（SMTC 缩略图常滞后于标题）
@@ -235,14 +337,63 @@ public static class SmtcListener
         {
             while (!stop.IsCancellationRequested)
             {
+                if (manager == null)
+                {
+                    // 上次没拿到、或拿到的用不了：先退避（1s 起步、逐次翻倍、封顶 30s）。
+                    // 等待挂在 stop 上，退出时不必等满
+                    if (acquireFails > 0)
+                    {
+                        var delayS = Math.Min(RetryMaxS, RetryMinS * Math.Pow(2, acquireFails - 1));
+                        try { await Task.Delay(TimeSpan.FromSeconds(delayS), stop); }
+                        catch (OperationCanceledException) { break; }
+                    }
+                    try
+                    {
+                        manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
+                    }
+                    catch (Exception ex)
+                    {
+                        // 一段连续失败只记第一次：退避到上限后每 30s 记一条只是噪音
+                        if (acquireFails == 0) Log.Error("smtc", ex);
+                        acquireFails++;
+                        continue;
+                    }
+                }
+
                 PlaybackState? state;
                 try
                 {
-                    var newSession = PickSession(manager.GetSessions(), getSource(), getBlocklist());
+                    IReadOnlyList<GlobalSystemMediaTransportControlsSession> sessions;
+                    try
+                    {
+                        sessions = manager.GetSessions();
+                        managerFails = 0;
+                        acquireFails = 0; // manager 真能用了才算恢复，退避从头计
+                    }
+                    catch (Exception ex)
+                    {
+                        // manager 本身失效后（系统媒体服务重启等）每次调用都会抛，光靠外层兜底
+                        // 只会原地空转、永远 state = null。连续失败几次就连同从它拿到的会话
+                        // 一起丢掉，下一轮重新获取；同样计入退避，免得新拿到的照样不能用时
+                        // 每隔一两秒就重来一遍
+                        if (++managerFails >= ManagerMaxFails)
+                        {
+                            if (acquireFails == 0) Log.Error("smtc", ex);
+                            acquireFails++;
+                            managerFails = 0;
+                            manager = null;
+                            Unsubscribe();
+                            session = null;
+                            sessionKey = "";
+                        }
+                        throw;
+                    }
+                    var newSession = PickSession(sessions, getSource(), getBlocklist());
                     // RCW 身份每次枚举都可能变，按 AUMID 判断是否真的换了会话
                     var newKey = newSession?.SourceAppUserModelId ?? "";
                     if (newSession == null || session == null || newKey != sessionKey)
                     {
+                        if (session != null) FreezeIfPaused(session, sessionKey);
                         Unsubscribe();
                         session = newSession;
                         sessionKey = newKey;
@@ -294,6 +445,11 @@ public static class SmtcListener
 
                 if (state != null)
                 {
+                    // 同一来源上次留下的基准；过期的当作没有，换了歌的由 MergeFrom 按 Key 丢弃
+                    PlaybackState? prev = null;
+                    if (bases.TryGetValue(state.SourceId, out var saved)
+                        && Clock.Now - saved.SeenAt <= (saved.State.Playing ? PlayingBaseKeepS : PausedBaseKeepS))
+                        prev = saved.State;
                     state.MergeFrom(prev);
                     // 暂停/恢复检测有固有延迟：对称补偿，消除逐次累积的进度漂移。
                     // 恢复时把计时起点提前 L；暂停时回退多算的 L。
@@ -303,8 +459,10 @@ public static class SmtcListener
                         if (state.Playing) state.BaseTime -= SmtcLatencyS;
                         else state.BasePositionS = Math.Max(0.0, state.BasePositionS - SmtcLatencyS);
                     }
+                    // 标题为空（切歌过渡、会话半初始化）不覆盖基准：主程序把它当「没有会话」，
+                    // 基准也不该因此丢掉，否则同一首歌再读回来又从头算起
+                    if (state.Title.Length > 0) bases[state.SourceId] = (state, Clock.Now);
                 }
-                prev = state;
                 onState(state);
 
                 var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

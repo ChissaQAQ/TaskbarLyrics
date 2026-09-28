@@ -158,29 +158,41 @@ public sealed class AppConfig
 
     private static bool _writeLogged;
 
+    // 存盘串行化。UI 线程（拖动松手、菜单、设置页）和后台线程（启动时检查更新写时间戳）
+    // 都会存盘，原先两边共用同一个 .tmp 且不加锁：一边在写、另一边抢着改名，轻则 IOException
+    // 丢掉一次写入，重则这次失败被当成「exe 同目录写不进去」，配置从此转存到 %AppData%。
+    // 用静态锁：ConfigPath 是静态的，转存退路的那次切换也得在锁里完成
+    private static readonly object SaveLock = new();
+
     /// <summary>存盘，返回是否成功（连退路都写不进去才算失败，调用方据此提示一次）。
     ///
     /// 原先整体吞掉异常：exe 装在 Program Files 之类只读位置时，设置在内存里当场生效、
     /// 一重启全丢，而且没有任何提示。现在先试 exe 同目录，不行就改存 %AppData%。</summary>
     public bool Save()
     {
-        if (TryWrite(ConfigPath)) return true;
-        var fallback = FallbackPath;
-        if (!string.Equals(ConfigPath, fallback, StringComparison.OrdinalIgnoreCase)
-            && TryWrite(fallback))
+        lock (SaveLock)
         {
-            // 留一条：这条路以前完全静默，而它意味着配置从此存在 %AppData%，
-            // 用户以为「删掉 exe 同目录的 config.json 就恢复默认」时会对不上账。
-            // 不弹窗——设置确实存住了，功能正常，Load 现在也会跟着读较新的那份
-            Log.Note("config-save", $"exe 同目录写不进去，配置已转存到 {fallback}");
-            ConfigPath = fallback; // 之后一直用退路，下次 Load 也会从那里读
-            return true;
+            if (TryWrite(ConfigPath)) return true;
+            var fallback = FallbackPath;
+            if (!string.Equals(ConfigPath, fallback, StringComparison.OrdinalIgnoreCase)
+                && TryWrite(fallback))
+            {
+                // 留一条：这条路以前完全静默，而它意味着配置从此存在 %AppData%，
+                // 用户以为「删掉 exe 同目录的 config.json 就恢复默认」时会对不上账。
+                // 不弹窗——设置确实存住了，功能正常，Load 现在也会跟着读较新的那份
+                Log.Note("config-save", $"exe 同目录写不进去，配置已转存到 {fallback}");
+                ConfigPath = fallback; // 之后一直用退路，下次 Load 也会从那里读
+                return true;
+            }
+            return false;
         }
-        return false;
     }
 
     private bool TryWrite(string path)
     {
+        // 临时文件名带上进程号：上面的锁只管得住本进程，而 --settings 单开的设置窗是另一个进程，
+        // 跟常驻的那份同时存盘时照样会撞上同一个 .tmp
+        var tmp = $"{path}.{Environment.ProcessId}.tmp";
         try
         {
             var dir = Path.GetDirectoryName(path);
@@ -188,13 +200,15 @@ public sealed class AppConfig
             // 先写临时文件再原子改名。直接覆写的话，写一半遇上关机/断电/杀进程
             // 就留下一份半截 JSON，而解析失败的代价是整份设置回默认值
             // （LyricsCache 那边踩过同一个坑，解法也是这个）
-            var tmp = path + ".tmp";
             File.WriteAllText(tmp, JsonSerializer.Serialize(this, JsonOptions));
             File.Move(tmp, path, overwrite: true);
             return true;
         }
         catch (Exception ex)
         {
+            // 名字不再固定，残留的临时文件不会被下一次写入覆盖掉，失败时顺手删掉
+            try { File.Delete(tmp); }
+            catch { /* 删不掉就算了 */ }
             // 只记第一次：拖动窗口每次松手都会存盘，失败时会把 error.log 刷满
             if (!_writeLogged)
             {

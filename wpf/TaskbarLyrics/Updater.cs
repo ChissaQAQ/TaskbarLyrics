@@ -23,6 +23,9 @@ public static class Updater
     private const string ReleasesApi =
         "https://api.github.com/repos/ChissaQAQ/TaskbarLyrics/releases/latest";
 
+    /// <summary>发布页（给用户看的，接力替换失败时让人手动下载）。</summary>
+    private const string ReleasesPage = "https://github.com/ChissaQAQ/TaskbarLyrics/releases/latest";
+
     private static readonly HttpClient Http = CreateApiClient();
 
     /// <summary>GitHub API 强制要求带 User-Agent，缺了会直接 403。</summary>
@@ -174,7 +177,9 @@ public static class Updater
         return NewExePath;
     }
 
-    /// <summary>启动新 exe 进入接力替换模式（随后调用方应退出本进程）。</summary>
+    /// <summary>启动新 exe 进入接力替换模式（随后调用方应退出本进程）。
+    /// 先启动、成功了才 quit：Process.Start 抛出（新 exe 被杀软隔离之类）时异常原样交给调用方反馈，
+    /// 此时本进程什么都还没动，照常运行。</summary>
     public static void StartApplyAndExit(string newExePath, Action quit)
     {
         var target = Environment.ProcessPath!;
@@ -187,9 +192,15 @@ public static class Updater
     }
 
     /// <summary>接力替换入口（新 exe 以 --apply-update &lt;目标路径&gt; &lt;旧pid&gt; 启动）：
-    /// 等旧进程退出后覆盖目标并重启。</summary>
+    /// 等旧进程退出后替换目标并重启。
+    ///
+    /// 本进程是 updates\TaskbarLyrics-new.exe，AppContext.BaseDirectory 指向 updates\ 而不是安装目录，
+    /// 所以这里的路径（日志、另存的新版）一律以目标 exe 所在目录为准。原先另存用的是
+    /// <see cref="NewExeDir"/>，拼出来是 updates\updates，另存必然失败。</summary>
     public static void ApplyUpdateMain(string targetExe, int oldPid)
     {
+        var targetDir = Path.GetDirectoryName(targetExe) ?? AppContext.BaseDirectory;
+        Log.RedirectTo(targetDir);
         for (var i = 0; i < 60; i++) // 最多等 30s
         {
             try
@@ -200,43 +211,87 @@ public static class Updater
             Thread.Sleep(500);
         }
         Thread.Sleep(500); // 等文件句柄释放
-        var copied = false;
+        // 新版先完整写到目标旁边的临时文件，再一次改名换上去：同卷改名是原子的，目标要么还是旧版、
+        // 要么已是新版。原先 File.Copy 直接原地覆盖，写到一半失败（磁盘满、被占用）目标 exe 就坏了，
+        // 旧版也没留下。没用 File.Replace：它会把旧文件的备用数据流并到新文件上，旧 exe 从浏览器
+        // 下载时带的「来自网络」标记（Zone.Identifier）会跟过来，更新后双击启动可能又弹一次 SmartScreen。
+        // 所以备份改成先复制一份 .old——新版能跑起来就说明替换成功，由 Cleanup() 删掉
+        var tmp = targetExe + ".tmp";
+        var backup = targetExe + ".old";
+        // 备份只是给「新版起不来」时手动恢复用的，复制失败不拦替换（原先压根没有备份）
+        try { if (File.Exists(targetExe)) File.Copy(targetExe, backup, true); }
+        catch (Exception ex) { Log.Error("applyupdate-backup", ex); }
+        var replaced = false;
         Exception? lastError = null;
         for (var i = 0; i < 10; i++)
         {
             try
             {
-                File.Copy(Environment.ProcessPath!, targetExe, true);
-                copied = true;
+                File.Copy(Environment.ProcessPath!, tmp, true);
+                File.Move(tmp, targetExe, overwrite: true);
+                replaced = true;
                 break;
             }
             catch (Exception ex) { lastError = ex; Thread.Sleep(500); }
         }
-        // 覆盖不了（目标仍被占用、装在只读目录）时绝不能装作成功：原先 10 次全失败也照样
+        try { File.Delete(tmp); } catch { /* 删不掉留给 Cleanup() */ }
+        // 替换不了（目标仍被占用、装在只读目录）时绝不能装作成功：原先 10 次全失败也照样
         // 重启旧 exe，用户看到程序回来了、以为已经是新版，实际什么都没变，连一行日志都没有。
-        // 这里记日志 + 明确告知，并把新 exe 另存一份——Cleanup() 只删 TaskbarLyrics-new.exe，
+        // 这里记日志 + 明确告知，并把新 exe 另存一份——Cleanup() 在 updates 里只删 TaskbarLyrics-new.exe，
         // 换个带版本号的名字才不会在下次启动时被清掉，用户才真能手工替换。
-        if (!copied)
+        if (!replaced)
         {
             Log.Error("applyupdate", lastError);
-            var keep = Path.Combine(NewExeDir, $"TaskbarLyrics-{CurrentVersion}.exe");
-            try { File.Copy(Environment.ProcessPath!, keep, true); }
-            catch (Exception ex) { Log.Error("applyupdate-keep", ex); keep = Environment.ProcessPath!; }
+            var keepDir = Path.Combine(targetDir, "updates");
+            string? keep = Path.Combine(keepDir, $"TaskbarLyrics-{CurrentVersion}.exe");
+            try
+            {
+                Directory.CreateDirectory(keepDir);
+                File.Copy(Environment.ProcessPath!, keep, true);
+            }
+            catch (Exception ex)
+            {
+                // 另存也失败时不能退回去指本进程自己（updates\TaskbarLyrics-new.exe）：
+                // 它正是下次启动时 Cleanup() 要删的文件，照着提示去找只会扑空
+                Log.Error("applyupdate-keep", ex);
+                keep = null;
+            }
             System.Windows.MessageBox.Show(
                 $"更新失败：无法覆盖\n{targetExe}\n\n将继续以旧版本启动。\n"
-                + $"新版本已保存在：\n{keep}\n退出程序后手动替换即可（详情见 error.log）。",
+                + (keep != null
+                    ? $"新版本已保存在：\n{keep}\n退出程序后手动替换即可（详情见 error.log）。"
+                    : $"新版本也没能另存下来，请到发布页手动下载：\n{ReleasesPage}\n（详情见 error.log）"),
                 "任务栏歌词", System.Windows.MessageBoxButton.OK,
                 System.Windows.MessageBoxImage.Warning);
         }
-        Process.Start(new ProcessStartInfo(targetExe)
+        // 放进 try：原先这里一抛就进 DispatcherUnhandledException 被吞掉（Handled=true），
+        // 用户看到的只是「更新完程序没回来」，既不知道发生了什么，也不知道该去打开哪个文件
+        try
         {
-            WorkingDirectory = Path.GetDirectoryName(targetExe)!,
-        });
+            Process.Start(new ProcessStartInfo(targetExe) { WorkingDirectory = targetDir });
+        }
+        catch (Exception ex)
+        {
+            Log.Error("applyupdate-restart", ex);
+            System.Windows.MessageBox.Show(
+                $"{(replaced ? "更新已完成，但没能自动启动新版本" : "没能重新启动程序")}：\n{targetExe}\n\n"
+                + "请手动打开它（详情见 error.log）。",
+                "任务栏歌词", System.Windows.MessageBoxButton.OK,
+                System.Windows.MessageBoxImage.Warning);
+        }
     }
 
-    /// <summary>启动时清掉上次更新留下的临时新 exe。</summary>
+    /// <summary>启动时清掉上次更新留下的临时文件：updates 里的新 exe，以及接力替换在 exe 旁边
+    /// 留下的 .old 备份和没换上去的 .tmp。能跑到这里就说明替换成功（或替换失败、旧版照常起来了），
+    /// 备份已经没用。updates 里带版本号的另存副本不动——那是替换失败时留给用户手工替换的。</summary>
     public static void Cleanup()
     {
         try { if (File.Exists(NewExePath)) File.Delete(NewExePath); } catch { /* 占用就留着 */ }
+        var self = Environment.ProcessPath;
+        if (string.IsNullOrEmpty(self)) return;
+        foreach (var leftover in new[] { self + ".old", self + ".tmp" })
+        {
+            try { File.Delete(leftover); } catch { /* 占用就留着 */ }
+        }
     }
 }

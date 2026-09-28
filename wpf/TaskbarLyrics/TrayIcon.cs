@@ -14,6 +14,7 @@ public sealed class TrayIcon : IDisposable
 {
     private readonly MainController _app;
     private readonly NotifyIcon _icon;
+    private bool _disposed;
 
     public TrayIcon(MainController app)
     {
@@ -57,11 +58,12 @@ public sealed class TrayIcon : IDisposable
             return mi;
         }
 
-        // 有新版本时菜单顶部显示更新入口
+        // 有新版本时菜单顶部显示更新入口；下载中置灰，免得用户以为没点上又点一遍
         if (_app.PendingUpdate is { } rel)
         {
-            menu.Items.Add(Item($"发现新版本 {rel.Tag}（点击更新）", false,
-                () => _ = _app.DownloadAndApplyAsync()));
+            menu.Items.Add(_app.IsUpdating
+                ? new MenuItem { Header = $"正在下载新版本 {rel.Tag}…", IsEnabled = false }
+                : Item($"发现新版本 {rel.Tag}（点击更新）", false, () => DownloadUpdate(rel.Tag)));
             menu.Items.Add(new Separator());
         }
 
@@ -84,6 +86,23 @@ public sealed class TrayIcon : IDisposable
         menu.Items.Add(new Separator());
         menu.Items.Add(Item("退出", false, _app.Quit));
         return menu;
+    }
+
+    /// <summary>菜单里点「更新」。原先直接丢弃 DownloadAndApplyAsync 的返回值：下载要几秒到几十秒，
+    /// 这期间毫无动静，失败了（断网、被拦截）也一声不吭，用户只看到点了没反应。
+    /// 现在开始时和失败时各弹一条托盘气泡；成功时进程已退出、新版自动启动，不必再说什么。</summary>
+    private async void DownloadUpdate(string tag)
+    {
+        ShowTip($"正在下载新版本 {tag}，完成后会自动重启", ToolTipIcon.Info);
+        var msg = await _app.DownloadAndApplyAsync(); // 内部已兜住所有异常，失败只回文案
+        if (msg.Length > 0) ShowTip(msg, ToolTipIcon.Warning);
+    }
+
+    /// <summary>下载那几秒里用户可能已经点了退出，图标没了就别再弹。</summary>
+    private void ShowTip(string text, ToolTipIcon icon)
+    {
+        if (_disposed) return;
+        _icon.ShowBalloonTip(5000, "任务栏歌词", text, icon);
     }
 
     /// <summary>托盘右键 / 歌词窗口右键：在光标处弹出同一份菜单。</summary>
@@ -133,6 +152,7 @@ public sealed class TrayIcon : IDisposable
 
     public void Dispose()
     {
+        _disposed = true;
         _icon.Visible = false;
         _icon.Dispose();
     }

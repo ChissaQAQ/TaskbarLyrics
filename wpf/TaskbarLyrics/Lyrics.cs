@@ -47,14 +47,113 @@ public static partial class Lyrics
     //     光锚 ^\s* 会被那个全角括号挡在门外。
     //  6) 乐手与致谢单列（小提琴/特别支持/鸣谢…）：它们和「作词」是同一类信息，
     //     只是词表最初没收——反转成以 KRC 为文本主体后，KRC 开头那串乐手表全露出来了。
+    //  7) 日文曲库的片假名职务（ギター/ミックス/ディレクター…）与「原唱/原曲」。
+    // 词表再怎么补也收不全乐手表（什么乐器都有），开头/结尾整块的放宽判定见 CreditMask
     [GeneratedRegex(@"^[\s(（\[【「『]*(?:(?:作词|作詞|作曲|编曲|編曲|改编|改編|填词|填詞|词曲|詞曲|制作|製作|制作人|製作人|监制|監製|监督|監督|出品|出品人|承制|承製|发行|發行|企划|企劃|策划|策劃|统筹|統籌|混音|母带|母帶|后期|後期|录音|錄音|录音室|錄音室|工作室|和声|和聲|合声|合聲|伴唱|主唱|配唱|合唱|演唱|演奏|吉他|贝斯|貝斯|鼓手|键盘|鍵盤|弦乐|弦樂|管乐|管樂|编写|編寫|封面|设计|設計|美术|美術|海报|海報|文案|宣传|宣傳|推广|推廣|翻译|翻譯|校对|校對|唱片|专辑|專輯|歌手|歌名|歌曲|版权|版權|著作权|著作權|授权|授權"
-        + @"|小提琴|中提琴|大提琴|提琴|钢琴|鋼琴|长笛|長笛|笛子|唢呐|嗩吶|二胡|古筝|古箏|琵琶|竹笛|萨克斯|薩克斯|口琴|手风琴|手風琴|合成器|打击乐|打擊樂|人声|人聲|编程|編程|特别支持|特別支持|特别鸣谢|特別鳴謝|特别感谢|特別感謝|鸣谢|鳴謝|感谢|感謝|音乐总监|音樂總監|总监|總監|监棚|監棚|艺人|藝人|经纪|經紀|词曲版权|詞曲版權)[^:：]{0,16}[:：]"
-        + @"|(?:[A-Za-z]{1,12}[\s.&/-]+){0,2}(?:OP|SP|ISRC|UPC|lyrics?|lyricist|composed?|composer|arrange[rd]?|arrangement|arranged|music|produced?|producer|vocals?|chorus|guitar|bass|drums?|keyboards?|strings|violin|cello|piano|flute|sax\w*|synth\w*|percussion|programming|engineer\w*|special\s+thanks|mix\w*|master\w*|record\w*|perform\w*|writer|written|label|studio|lrc|krc|qrc|trc)[^:：]{0,16}[:：]"
+        + @"|小提琴|中提琴|大提琴|提琴|钢琴|鋼琴|长笛|長笛|笛子|唢呐|嗩吶|二胡|古筝|古箏|琵琶|竹笛|萨克斯|薩克斯|口琴|手风琴|手風琴|合成器|打击乐|打擊樂|人声|人聲|编程|編程|特别支持|特別支持|特别鸣谢|特別鳴謝|特别感谢|特別感謝|鸣谢|鳴謝|感谢|感謝|音乐总监|音樂總監|总监|總監|监棚|監棚|艺人|藝人|经纪|經紀|词曲版权|詞曲版權"
+        + @"|原唱|原曲|ボーカル|ギター|ベース|ドラム|キーボード|ストリングス|コーラス|ミックス|マスタリング|レコーディング|エンジニア|ディレクター|ディレクション|プロデューサー|プロデュース|アレンジ|イラスト|動画|映像|調声|調教)[^:：]{0,16}[:：]"
+        + @"|(?:[A-Za-z]{1,12}[\s.&/-]+){0,2}(?:OP|SP|ISRC|UPC|lyrics?|lyricist|composed?|composer|arrange[rd]?|arrangement|arranged|music|produced?|producer|vocals?|chorus|guitar|bass|drums?|keyboards?|strings|violin|viola|cello|piano|flute|trumpet|trombone|horn|organ|sax\w*|synth\w*|percussion|programming|instrument\w*|direct(?:or|ion|ed)|assist\w*|engineer\w*|special\s+thanks|mix\w*|master\w*|record\w*|perform\w*|writer|written|label|studio|lrc|krc|qrc|trc)[^:：]{0,16}[:：]"
         + @"|[词詞曲唱鼓歌][\s/、&＆和与]*[词詞曲唱鼓歌]?\s*[:：]"
         + @"|(?:未经|未經|本(?:歌曲|作品|专辑|專輯))[^\n]{0,30}(?:许可|許可|授权|授權|版权|版權|同意)"
         + @"|.*(?:版权所有|版權所有|all\s+rights\s+reserved|unauthorized\s+(?:reproduction|copying)))",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex CreditLineRegex();
+
+    // 「键：值」形状的行，键取冒号前那段，只在开头/结尾的制作信息块里用（见 CreditMask）。
+    // 键里不许有句读和引号（那是在说话，不是在报职务），也不许有平假名：日文职务名只用
+    // 汉字、片假名或英文（作詞/ギター/Sound Director），出现平假名就是在唱歌词。
+    // 冒号必须是全角，或半角后面跟空白——半角紧贴着值的 "BPM:140"、"4:30 AM"、
+    // "RE:ラビュー" 都是歌词本身，前一个还正好是某首歌的最后一句
+    [GeneratedRegex(@"^[\s(（\[【「『]*(?<key>[^:：。，！？!?「」『』“”""ぁ-ゟ]{1,40}?)\s*(?:：|:\s)\s*\S")]
+    private static partial Regex KeyValueLineRegex();
+
+    // 对唱/分段标签（「男：」「合唱：」「Rap：」）标明的是谁唱、唱哪段，后面跟的是歌词。
+    // 形状和制作信息一模一样，放宽判定时得单独放行；单字的（男/女/合/A）按长度放行，不列在这
+    [GeneratedRegex(@"^(?:男女|女男|男声|女声|男聲|女聲|童声|童聲|全体|全體|全员|全員|all|both|rap|verse\s*\d*|hook|bridge|intro|outro|pre-?chorus)$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex PartLabelRegex();
+
+    // 键像在说话：带人称代词，或以「说/问」这类言说动词收尾（「你说：……」「妈妈问：……」）。
+    // 职务名从来不带人称，而歌词首句用引语开头并不少见，放宽判定不能把它当成制作信息。
+    // 「吉他」「其他/其它乐器」里的他/它不是人称，得让开
+    [GeneratedRegex(@"(?<![吉其])他|(?<!其)它|[我你她您咱俺私僕君]|(?:说|說|问|問|讲|講|曰|喊|答)$|\b(?:i|you|he|she|we|they|me|my|your|his|her|our|their)\b",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex SpeechKeyRegex();
+
+    // 标题行里歌名和歌手之间的分隔符，两侧必须有空白：歌词里的「ー」「-」多是连在字上的
+    [GeneratedRegex(@"\s[-－–—]\s")]
+    private static partial Regex TitleSeparatorRegex();
+
+    // 译文行尾挂着的译者署名：「……（翻译：某某）」「……(翻译水平有限 授权网易云音乐使用)」。
+    // 它附在真歌词的译文后面，整行滤掉会连原文一起丢，只能把这段括号剪掉
+    [GeneratedRegex(@"\s*[（(][^（）()]*(?:翻译|翻譯|译者|譯者|校对|校對|听译|聽譯|授权|授權|转载|轉載|translat\w*)[^（）()]*[）)]\s*$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex TransCreditSuffixRegex();
+
+    /// <summary>逐行判定是不是制作信息（true = 该滤掉）。所有滤制作信息的地方
+    /// （合并译文、译文覆盖率、主歌词、KRC）共用这一个判定，免得各处口径不一。
+    ///
+    /// 光靠 CreditLineRegex 的职务词表永远收不全：乐手表里什么乐器都有（Trumpet、
+    /// Hammond Organ、SN Roll……），还有「Sound Direction」「原唱」「电吉他 Electric Guitar」
+    /// 这种词表外或中英双语的写法；主歌词开头的「歌名 - 歌手」标题行更是一个职务词都不带。
+    /// 实测缓存里漏网的全是这两类，而且无一例外挤在歌词的最前面。
+    ///
+    /// 所以按位置放宽：曲库总把制作信息整块放在开头（或结尾），块内每行都是「键：值」。
+    /// 从首行往后、从末行往前各扫一段，只要还是「键：值」或标题行就算制作信息，
+    /// 碰到第一句正常歌词就停——块外仍只认严格的词表，歌词中间带冒号的句子不受影响。
+    /// 放宽的「键：值」还要过两道闸，防的是对唱标签（「男：」「周：」「Rap：」）：
+    /// 键不能是分段/对唱标签或歌手名，且同一个键整首只能出现一次——
+    /// 对唱标签会反复出现，制作信息里每个职务只报一次。</summary>
+    private static bool[] CreditMask(IReadOnlyList<string> texts, IReadOnlyList<string?>? trans,
+        string title, string artist)
+    {
+        var n = texts.Count;
+        var mask = new bool[n];
+        for (var i = 0; i < n; i++)
+            mask[i] = CreditLineRegex().IsMatch(texts[i])
+                // 译文轨也查一遍：有些投稿把制作信息塞在翻译那一行上（正文是作品名、
+                // 译文写「作詞：某某 作曲：某某」），只看正文会漏掉整行
+                || (trans?[i] is { } tr && CreditLineRegex().IsMatch(tr))
+                // 标题行只在开头几行查：往后再出现同名文本就是副歌在唱曲名了
+                || (i < 4 && LooksLikeTitleLine(texts[i], title, artist));
+
+        var artists = SplitArtists(artist);
+        var keys = new string?[n];
+        var keyCount = new Dictionary<string, int>();
+        for (var i = 0; i < n; i++)
+        {
+            var m = KeyValueLineRegex().Match(texts[i]);
+            if (!m.Success) continue;
+            var key = m.Groups["key"].Value.Trim();
+            var nk = NormalizeForMatch(key);
+            // 键里得有字母：纯数字的是时刻（「4：30」）；
+            // 单字键（男/女/合/周/A）是对唱标签；键是歌手名的也是（「周杰伦：……」）
+            if (!key.Any(char.IsLetter) || nk.Length <= 1 || PartLabelRegex().IsMatch(key)
+                || SpeechKeyRegex().IsMatch(key)
+                || artists.Any(a => a == nk || a.Contains(nk))) continue;
+            keys[i] = nk;
+            keyCount[nk] = keyCount.GetValueOrDefault(nk) + 1;
+        }
+        bool Edge(int i) => mask[i] || (keys[i] is { } k && keyCount[k] == 1);
+
+        for (var i = 0; i < n && (Edge(i) || LooksLikeHeaderTitle(texts[i], title, artists)); i++)
+            mask[i] = true;
+        for (var i = n - 1; i >= 0 && Edge(i); i--)
+            mask[i] = true;
+        return mask;
+    }
+
+    /// <summary>主歌词开头的「歌名 - 歌手」（或反过来）标题行，网易云常见、时间戳是 0。
+    /// 比 LooksLikeTitleLine 宽：歌名或任一歌手出现一个就够——标题行里的歌手常比 SMTC
+    /// 报的多一截（"キタニタツヤ/suis (suis from ヨルシカ)"），要求整串歌手名原样出现就对不上。
+    /// 放宽的代价由两条约束兜着：必须带两侧有空白的分隔符，且只在开头的制作信息块里查。</summary>
+    private static bool LooksLikeHeaderTitle(string text, string title, List<string> artists)
+    {
+        if (!TitleSeparatorRegex().IsMatch(text)) return false;
+        var t = NormalizeForMatch(text);
+        var nt = NormalizeForMatch(title);
+        return (nt.Length > 0 && t.Contains(nt)) || artists.Any(t.Contains);
+    }
 
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(5) };
 
@@ -106,17 +205,20 @@ public static partial class Lyrics
 
     /// <summary>把译文按最近时间戳并到原文行，每条译文最多用一次。</summary>
     private static List<LyricLine> MergeTranslation(
-        List<(int Ms, string Text)> lines, List<(int Ms, string Text)> trans, int tolMs = 1200)
+        List<(int Ms, string Text)> lines, List<(int Ms, string Text)> trans,
+        string title, string artist, int tolMs = 1200)
     {
         var used = new bool[trans.Count];
         var merged = new List<LyricLine>(lines.Count);
-        foreach (var (ms, text) in lines)
+        var credit = CreditMask(lines.Select(l => l.Text).ToList(), null, title, artist);
+        for (var li = 0; li < lines.Count; li++)
         {
+            var (ms, text) = lines[li];
             // 制作信息行不参与配译文。网易云的 lrc 开头一律带「作词/作曲/编曲/制作人」
             // 四五行、tlyric 一律不带，而这些行的时间戳全挤在 0~1s，正好落在首句译文的
             // 时间窗内——让它们参与就会把首句的译文抢走再标成已用，首句反倒没了译文。
             // 这是「首句经常没有翻译」的真凶（Lemon：两边首句都在 00:00.851，却配不上）
-            if (CreditLineRegex().IsMatch(text))
+            if (credit[li])
             {
                 merged.Add(new LyricLine(ms, text, null));
                 continue;
@@ -131,7 +233,8 @@ public static partial class Lyrics
             if (best >= 0)
             {
                 used[best] = true;
-                merged.Add(new LyricLine(ms, text, trans[best].Text));
+                var tr = TransCreditSuffixRegex().Replace(trans[best].Text, "");
+                merged.Add(new LyricLine(ms, text, tr.Length > 0 ? tr : null));
             }
             else
             {
@@ -147,8 +250,15 @@ public static partial class Lyrics
     /// （实测 Position=0、EndTime=0、LastUpdatedTime 还停在 1601 年的初值），
     /// 而单曲循环检测要靠「插值进度超过歌曲时长」来判断，没有时长就只能拿
     /// 「最后一句歌词 + 一个猜的余量」凑——尾奏比余量长的歌一到尾奏就被误判成
-    /// 重播、进度归零、显示回开头那句（主人反馈的「快结束时又显示开头歌词」）。</summary>
-    private sealed record SourceResult(List<LyricLine> Lines, double DurationS);
+    /// 重播、进度归零、显示回开头那句（主人反馈的「快结束时又显示开头歌词」）。
+    ///
+    /// Degraded / NotFound 只有网易云源会置位，含义对应 FetchResult 的 Degraded / PrimaryNotFound：
+    /// 前者是「首选候选的歌词请求失败、用了次选候选」，后者是「正常应答、确实没有」（此时 Lines 为空）。
+    /// 「确实没有」不能再用 null 表达——null 同时还代表限流、错误码，调用方分不清该不该重试。
+    /// ArtistMismatch：候选里一个歌手都对不上，是放开歌手闸挑出来的（见 PreferArtistMatched），
+    /// 多半是同名翻唱。它只配当备胎，FetchAsync 会先去别的源找歌手对得上的版本。</summary>
+    private sealed record SourceResult(List<LyricLine> Lines, double DurationS,
+        bool Degraded = false, bool NotFound = false, bool ArtistMismatch = false);
 
     // ---- 网易云 ----
 
@@ -161,25 +271,31 @@ public static partial class Lyrics
             {
                 ["s"] = $"{title} {artist}", ["type"] = "1", ["limit"] = "30",
             }), referer);
+        // 限流 / 风控时网易云照样回 HTTP 200，只是 JSON 的 code 变成 -460 / -462 / 405 / 406 之类，
+        // 也不带 result。原先这和「确实搜不到」一起走 return null，调用方就分不清是该等它恢复
+        // 还是该死心——所以非正常应答直接抛出，按请求失败处理（FetchAsync 会换下一个源）
+        if (!NeteaseOk(search.RootElement))
+            throw new InvalidDataException($"网易云搜索应答异常 code={NeteaseCode(search.RootElement)}");
+        // 走到这里是正常应答：没有 songs（搜索结果为 0 时连这个字段都不带）就是确实没有
         if (!search.RootElement.TryGetProperty("result", out var result)
             || !result.TryGetProperty("songs", out var songs)
             || songs.ValueKind != JsonValueKind.Array)
-            return null;
+            return new SourceResult(new List<LyricLine>(), 0, NotFound: true);
         // 歌手宽松匹配：SMTC 的歌手串常是多歌手（"A/B"）或变体名，
-        // 严格相等会漏歌（「Lyricify 能显示而我们不能」的主因之一）
+        // 严格相等会漏歌（「Lyricify 能显示而我们不能」的主因之一）。比较规则见 ArtistMatches
         static bool ArtistMatch(JsonElement song, string artist)
         {
-            if (!song.TryGetProperty("artists", out var artists)) return false;
-            foreach (var a in artists.EnumerateArray())
-            {
-                var n = a.TryGetProperty("name", out var nv) ? nv.GetString() ?? "" : "";
-                if (n.Length == 0) continue;
-                if (string.Equals(n, artist, StringComparison.OrdinalIgnoreCase)) return true;
-                if (artist.Contains(n, StringComparison.OrdinalIgnoreCase)) return true;
-                if (n.Contains(artist, StringComparison.OrdinalIgnoreCase) && artist.Length > 0) return true;
-            }
-            return false;
+            if (!song.TryGetProperty("artists", out var artists)
+                || artists.ValueKind != JsonValueKind.Array) return false;
+            return ArtistMatches(artists.EnumerateArray()
+                .Select(a => a.TryGetProperty("name", out var nv) ? nv.GetString() ?? "" : ""), artist);
         }
+        // 别名只给版本标签判断用：有的 Live / 伴奏条目歌名是干净的，标签在 alias 里
+        static string? AliasOf(JsonElement song) =>
+            song.TryGetProperty("alias", out var al) && al.ValueKind == JsonValueKind.Array
+                ? string.Join(" ", al.EnumerateArray()
+                    .Select(x => x.ValueKind == JsonValueKind.String ? x.GetString() ?? "" : ""))
+                : null;
         var all = songs.EnumerateArray().ToList();
         // 曲库登记的时长（毫秒 → 秒），既用于挑候选也要带回给调用方补 SMTC 的空缺
         static double DurOf(JsonElement song) =>
@@ -188,7 +304,8 @@ public static partial class Lyrics
         // 只按歌手+时长挑会把同歌手、时长接近的别的歌抓来（主人反馈偶尔匹配错歌）
         var scored = all
             .Select(s => (Song: s,
-                          Ts: TitleScore(s.TryGetProperty("name", out var nv) ? nv.GetString() ?? "" : "", title),
+                          Ts: TitleScore(s.TryGetProperty("name", out var nv) ? nv.GetString() ?? "" : "", title,
+                              AliasOf(s)),
                           Artist: ArtistMatch(s, artist),
                           DurDiff: durationS > 0 && s.TryGetProperty("duration", out _)
                               ? Math.Abs(DurOf(s) - durationS) : 0.0))
@@ -202,13 +319,22 @@ public static partial class Lyrics
         var ordered = PreferArtistMatched(scored, x => x.Artist)
             .Select(x => (x.Song, x.Ts))
             .ToList();
+        // 实测「告白氣球 / 周杰倫」：网易云没有周杰伦的版本，搜出来全是翻唱、伴奏和 beat。
+        // 带时长的播放器（QQ 音乐、Spotify）一过时长闸，剩下的歌手全对不上，放开后挑中的是
+        // 歌名完全相等的 228s 翻唱——时间轴跟原唱差十几秒，还当成完整结果写进缓存冻结 30 天，
+        // 而 QQ 那边明明就有原唱。所以得把「是放开挑的」带出去，由 FetchAsync 统筹各源
+        var artistMismatch = !scored.Any(x => x.Artist);
         // 候选逐个尝试：同一首歌常有多个版本，
         // 有的版本没译文（主人反馈网易云明显有译文却显示不出来），优先带译文的版本
-        if (ordered.Count == 0) return null;
+        // 搜索正常应答、只是没有歌名/时长对得上的候选：同样是「确实没有」
+        if (ordered.Count == 0) return new SourceResult(new List<LyricLine>(), 0, NotFound: true);
         SourceResult? firstResult = null;
         SourceResult? bestTrans = null;
         var bestTs = -1;
         var bestRatio = -1.0;
+        // 有候选的歌词请求失败过：这时挑出来的未必是本该挑的那个（多半就是首选候选挂了、
+        // 落到了次选），结果要标成降级、不进缓存，否则一次抖动会把次优版本冻结 30 天
+        var anyFailed = false;
         foreach (var (cand, ts) in ordered.Take(3))
         {
             var id = cand.GetProperty("id").GetInt64();
@@ -224,10 +350,13 @@ public static partial class Lyrics
                         ["tv"] = "-1", ["rv"] = "-1",
                     }), referer);
             }
-            catch { continue; } // 单个候选失败换下一个
+            catch { anyFailed = true; continue; } // 单个候选失败换下一个
             using (lyric)
             {
                 var root = lyric.RootElement;
+                // 歌词接口被限流时同样是 HTTP 200 + 非 200 的 code、没有 lrc 字段，
+                // 不查 code 的话下面会把它当成「这个版本没歌词」静默跳过，算成请求失败才对
+                if (!NeteaseOk(root)) { anyFailed = true; continue; }
                 var lines = ParseLrc(GetLyricText(root, "lrc"));
                 // 有的条目只上传了译文或罗马音，原文 lrc 是空的（May'n「春夢」就是这样：
                 // 955 字带时间轴的歌词全在 tlyric 里，lrc 一个字都没有）。
@@ -252,8 +381,10 @@ public static partial class Lyrics
                         "romaji" => ParseLrc(GetLyricText(root, "romalrc")),
                         _ => new List<(int, string)>(),
                     };
-                var merged = MergeTranslation(lines, trans);
-                var picked = new SourceResult(merged, DurOf(cand));
+                var merged = MergeTranslation(lines, trans, title, artist);
+                // 提前返回时后面的候选还没打，失败只可能出在前面，此刻的 anyFailed 就是全部
+                var picked = new SourceResult(merged, DurOf(cand), Degraded: anyFailed,
+                    ArtistMismatch: artistMismatch);
                 firstResult ??= picked;
                 if (secondLine == "off") return picked;
                 // 比较各候选的译文覆盖情况，取最好的那个——不能「见到任意一行译文就走」。
@@ -267,11 +398,19 @@ public static partial class Lyrics
                 //  100 行有译文，抓回来的整首都是 Live 的即兴口白）。
                 // 而且这两道闸平时的兜底——时长差与「歌词比歌长」——在网易云上双双失效：
                 // 它的 SMTC 完全不上报 timeline，durationS 恒为 0，两处判断直接短路。
-                // 覆盖率也必须用比率而不是行数：本意只是「别挑到残缺翻译」，比率就够了
-                var ratio = merged.Count == 0 ? 0 : merged.Count(l => l.Trans != null) / (double)merged.Count;
+                // 覆盖率也必须用比率而不是行数：本意只是「别挑到残缺翻译」，比率就够了。
+                // 比率要把制作信息行排除在外再算（判定与 FetchAsync 的过滤一致）：作词/作曲那几行
+                // 从来没有译文，按全部行算比率永远到不了 1（「居眠り遠征隊」是 43/45 = 0.956），
+                // 下面的收工条件原先等于死代码，每首歌都白打后面两个候选
+                var credit = CreditMask(merged.Select(l => l.Text).ToList(),
+                    merged.Select(l => l.Trans).ToList(), title, artist);
+                var lyricLines = merged.Where((_, i) => !credit[i]).ToList();
+                var ratio = lyricLines.Count == 0 ? 0 : lyricLines.Count(l => l.Trans != null) / (double)lyricLines.Count;
                 // 歌名满分且译文全覆盖才立刻收工，不白打后面候选的接口。
-                // 只看全覆盖是不够的：Live 版也可能全覆盖，先返回就再也轮不到正确的那首
-                if (ts >= 2 && ratio >= 1) return picked;
+                // 只看全覆盖是不够的：Live 版也可能全覆盖，先返回就再也轮不到正确的那首。
+                // 收工和择优用的是同一个 ratio：满足条件的已是 (歌名满分, 1)，前面不可能有更好的，
+                // 后面的在严格 > 的比较下也赢不了它，提前收工与走完全程挑中的是同一个
+                if (ts >= TitleScoreMax && ratio >= 1) return picked;
                 if (ts > bestTs || (ts == bestTs && ratio > bestRatio))
                 {
                     bestTs = ts;
@@ -280,8 +419,25 @@ public static partial class Lyrics
                 }
             }
         }
-        return bestTrans ?? firstResult;
+        var best = bestTrans ?? firstResult;
+        // 一个能用的都没有：有候选请求失败就是「没拿到」，返回 null 让调用方换源并重试；
+        // 全都正常应答却没有可用歌词（纯音乐、歌词比歌长的错版本）才是「确实没有」
+        if (best == null)
+            return anyFailed ? null : new SourceResult(new List<LyricLine>(), 0, NotFound: true);
+        // 择优挑中的候选可能早于后面某个失败的候选，失败标记要按全程重算
+        return best with { Degraded = anyFailed };
     }
+
+    /// <summary>网易云应答的 code 是不是 200。缺 code 也按异常算：正常应答一向带着它，
+    /// 缺了多半是被网关/风控页替换过的内容，不能当「没有」解读。</summary>
+    private static bool NeteaseOk(JsonElement root)
+        => root.ValueKind == JsonValueKind.Object
+            && root.TryGetProperty("code", out var c) && c.ValueKind == JsonValueKind.Number
+            && c.TryGetInt32(out var v) && v == 200;
+
+    private static string NeteaseCode(JsonElement root)
+        => root.ValueKind == JsonValueKind.Object && root.TryGetProperty("code", out var c)
+            ? c.GetRawText() : "缺失";
 
     private static string GetLyricText(JsonElement root, string key)
     {
@@ -301,17 +457,24 @@ public static partial class Lyrics
             {
                 ["w"] = $"{title} {artist}", ["format"] = "json", ["n"] = "5",
             }), referer);
+        // 与 NeteaseOk 同理：code 非 0 是限流/风控，得按请求失败抛出，不能当「没这首歌」——
+        // FetchAsync 要靠它分辨「退回翻唱备胎」这份结果是最终答案还是这次运气不好
+        if (search.RootElement.TryGetProperty("code", out var qc) && qc.ValueKind == JsonValueKind.Number
+            && qc.TryGetInt32(out var qv) && qv != 0)
+            throw new InvalidDataException($"QQ 搜索应答异常 code={qv}");
         if (!search.RootElement.TryGetProperty("data", out var data)
             || !data.TryGetProperty("song", out var song)
             || !song.TryGetProperty("list", out var list)
             || list.ValueKind != JsonValueKind.Array || list.GetArrayLength() == 0)
             return null;
 
-        static string SingerNames(JsonElement s) =>
-            s.TryGetProperty("singer", out var singers)
-                ? string.Join(" ", singers.EnumerateArray().Select(x =>
-                    x.TryGetProperty("name", out var n) ? n.GetString() ?? "" : ""))
-                : "";
+        // 逐个歌手名交给 ArtistMatches 拆分比较。原先拼成 "B A" 一整串再 Contains SMTC 的 "A/B"，
+        // 多歌手的歌几乎必然对不上
+        static IEnumerable<string> SingerNames(JsonElement s) =>
+            s.TryGetProperty("singer", out var singers) && singers.ValueKind == JsonValueKind.Array
+                ? singers.EnumerateArray().Select(x =>
+                    x.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "")
+                : Enumerable.Empty<string>();
 
         var songs = list.EnumerateArray().ToList();
         // 与网易云同一套标准：歌名必须匹配，歌手/时长只是排序权重（防兜底拿到同歌手别的歌）
@@ -320,8 +483,7 @@ public static partial class Lyrics
         var ordered = songs
             .Select(s => (Song: s,
                           Ts: TitleScore(s.TryGetProperty("songname", out var nv) ? nv.GetString() ?? "" : "", title),
-                          Artist: artist.Length > 0
-                              && SingerNames(s).Contains(artist, StringComparison.OrdinalIgnoreCase),
+                          Artist: ArtistMatches(SingerNames(s), artist),
                           DurDiff: durationS > 0 ? Math.Abs(IntervalOf(s) - durationS) : 0.0))
             .Where(x => x.Ts > 0)
             .Where(x => durationS <= 0 || x.DurDiff <= 20)
@@ -347,7 +509,8 @@ public static partial class Lyrics
         // 歌词总长远超歌曲时长 → 抓错歌嫌疑，放弃本源交给 LRCLIB 兜底
         if (durationS > 0 && lines[^1].Ms / 1000.0 > durationS + 30) return null;
         var trans = ParseLrc(lyric.RootElement.TryGetProperty("trans", out var t) ? t.GetString() ?? "" : "");
-        return new SourceResult(MergeTranslation(lines, trans), IntervalOf(chosen));
+        return new SourceResult(MergeTranslation(lines, trans, title, artist), IntervalOf(chosen),
+            ArtistMismatch: !ordered.Any(x => x.Artist));
     }
 
     // ---- LRCLIB ----
@@ -359,7 +522,9 @@ public static partial class Lyrics
         using var req = new HttpRequestMessage(HttpMethod.Get, "https://lrclib.net/api/get?" + Q(p));
         req.Headers.TryAddWithoutValidation("User-Agent", "taskbar-lyrics v0.1");
         using var resp = await Http.SendAsync(req);
-        if (!resp.IsSuccessStatusCode) return null;
+        // 404 是「确实没有」；别的失败码（5xx、限流）是这次没拿到，抛出去按请求失败算（理由同 QQ）
+        if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) return null;
+        resp.EnsureSuccessStatusCode();
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
         if (!doc.RootElement.TryGetProperty("syncedLyrics", out var synced)
             || synced.ValueKind != JsonValueKind.String)
@@ -368,7 +533,12 @@ public static partial class Lyrics
         if (lines.Count == 0) return null;
         var dur = doc.RootElement.TryGetProperty("duration", out var dv)
                   && dv.ValueKind == JsonValueKind.Number ? dv.GetDouble() : 0.0;
-        return new SourceResult(MergeTranslation(lines, new List<(int, string)>()), dur);
+        // LRCLIB 按歌名+歌手取条目，一般不会给错歌手；照样核一遍，跟另外两家同一套口径
+        var mismatch = doc.RootElement.TryGetProperty("artistName", out var an)
+            && an.ValueKind == JsonValueKind.String
+            && !ArtistMatches(new[] { an.GetString() ?? "" }, artist);
+        return new SourceResult(MergeTranslation(lines, new List<(int, string)>(), title, artist), dur,
+            ArtistMismatch: mismatch);
     }
 
     // ---- 逐字：酷狗 KRC ----
@@ -418,6 +588,13 @@ public static partial class Lyrics
         return lines.OrderBy(x => x.StartMs).ToList();
     }
 
+    /// <summary>给酷狗候选过滤用的歌曲时长：SMTC 报了就用 SMTC 的，否则退回主歌词源曲库登记的时长。
+    /// 网易云客户端的 SMTC 不上报 timeline，durationS 恒为 0，直接传进去酷狗那边的
+    /// 「时长差 ≤ 20s」过滤就整个短路，逐字很容易对到同名的 Live/remix 版本上。
+    /// 正式路径和诊断入口都走这里，诊断结果才代表正式程序的行为。</summary>
+    private static double KugouDurationOf(double smtcDurationS, double songDurationS)
+        => smtcDurationS > 0 ? smtcDurationS : songDurationS;
+
     private static async Task<List<KrcLine>?> FetchKugouKaraokeAsync(string title, string artist, double durationS)
     {
         using var search = await GetJsonAsync(
@@ -425,6 +602,11 @@ public static partial class Lyrics
             {
                 ["format"] = "json", ["keyword"] = $"{title} {artist}", ["page"] = "1", ["pagesize"] = "5",
             }));
+        // 与 NeteaseOk 同理：被限流/风控时酷狗常照样回 HTTP 200，只是状态码不对、不带 data.info。
+        // 当成「酷狗没有」返回 null 会让这首歌「没有逐字」进缓存冻结 30 天，所以抛出去，
+        // 由 FetchAsync 当作请求失败标降级。只有应答正常而确实没结果才返回 null
+        if (!KugouOk(search.RootElement, "status", 1) || !KugouOk(search.RootElement, "errcode", 0))
+            throw new InvalidDataException("酷狗搜索应答异常");
         if (!search.RootElement.TryGetProperty("data", out var data)
             || !data.TryGetProperty("info", out var info)
             || info.ValueKind != JsonValueKind.Array || info.GetArrayLength() == 0)
@@ -435,10 +617,9 @@ public static partial class Lyrics
         static bool KgArtistMatch(JsonElement s, string artist)
         {
             var sn = s.TryGetProperty("singername", out var n) ? n.GetString() ?? "" : "";
-            // singername 为空时不能放行（空串是任何串的子串，恒真会误匹配）
-            return artist.Length > 0 && sn.Length > 0
-                && (artist.Contains(sn, StringComparison.OrdinalIgnoreCase)
-                    || sn.Contains(artist, StringComparison.OrdinalIgnoreCase));
+            // singername 是 "A、B" 一整串，拆分交给 ArtistMatches；
+            // 为空时它也不会放行（空串是任何串的子串，恒真会误匹配）
+            return ArtistMatches(new[] { sn }, artist);
         }
         var ordered = songs
             .Select(s => (Song: s,
@@ -466,6 +647,8 @@ public static partial class Lyrics
                 ["duration"] = ((int)(chosenDur * 1000)).ToString(),
                 ["hash"] = hash,
             }));
+        if (!KugouOk(krcSearch.RootElement, "status", 200))
+            throw new InvalidDataException("酷狗歌词搜索应答异常");
         if (!krcSearch.RootElement.TryGetProperty("candidates", out var candidates)
             || candidates.ValueKind != JsonValueKind.Array || candidates.GetArrayLength() == 0)
             return null;
@@ -482,26 +665,118 @@ public static partial class Lyrics
         return ParseKrc(DecodeKrc(content));
     }
 
-    /// <summary>歌名匹配度：0=不匹配，1=归一化后一方包含另一方（覆盖 "(Live)" 等后缀差异），
-    /// 2=归一化完全相等。歌名是防错配的第一道闸：只按歌手+时长挑候选，
-    /// 会把同歌手、时长接近的另一首歌的歌词抓来。</summary>
-    private static int TitleScore(string candidate, string title)
+    /// <summary>酷狗应答里的某个状态字段是不是给定的数字。缺字段也按异常算（理由同 NeteaseOk）。</summary>
+    private static bool KugouOk(JsonElement root, string key, int expected)
+        => root.ValueKind == JsonValueKind.Object
+            && root.TryGetProperty(key, out var c) && c.ValueKind == JsonValueKind.Number
+            && c.TryGetInt32(out var v) && v == expected;
+
+    /// <summary>歌名匹配度：0=不匹配；归一化完全相等为 4，一方包含另一方（覆盖 "(Live)" 等后缀差异）为 2；
+    /// 候选带了 SMTC 歌名里没有的版本标签（Live/现场/伴奏/Inst/纯音乐/DJ/Remix/翻唱/Cover/Karaoke/
+    /// Acoustic/弾き語り/Piano/加速降速等，完整列表见 VersionTagRegex）再减 1。
+    /// 歌名是防错配的第一道闸：只按歌手+时长挑候选，会把同歌手、时长接近的另一首歌的歌词抓来。
+    ///
+    /// 标签只在「同一档」里往后挪（4→3、2→1），不跨档：完全相等的永远排在包含的前面，
+    /// 跟原来「0/1/2」三档的先后一致，择优时「歌名分数优先、再比译文覆盖率」的逻辑不受影响。
+    /// 原来「告白气球 (Live)」和「告白气球 (电影插曲)」同为 1 分，谁先谁后全看搜索排序，
+    /// 现在前者一定在后。SMTC 歌名自己带着同类标签就不罚——用户听的本来就是 Live 版。
+    /// versionHint 是只参与标签判断的附加文本（网易云的 alias：有的 Live 版歌名干干净净，
+    /// 标签写在别名里），不参与歌名相等/包含的比较。</summary>
+    private static int TitleScore(string candidate, string title, string? versionHint = null)
     {
         var a = NormalizeForMatch(candidate);
         var b = NormalizeForMatch(title);
         if (a.Length == 0 || b.Length == 0) return 0;
-        if (a == b) return 2;
-        return a.Contains(b) || b.Contains(a) ? 1 : 0;
+        var score = a == b ? TitleScoreMax : a.Contains(b) || b.Contains(a) ? 2 : 0;
+        if (score == 0) return 0;
+        var titleTags = VersionTagsOf(title);
+        var candTags = VersionTagsOf(versionHint == null ? candidate : candidate + " " + versionHint);
+        return candTags.Any(t => !titleTags.Contains(t)) ? score - 1 : score;
     }
+
+    /// <summary>TitleScore 的满分：归一化完全相等、且没有多出来的版本标签。</summary>
+    private const int TitleScoreMax = 4;
 
     /// <summary>候选池收敛：只要有一个候选的歌手对得上，就只在这些候选里挑。
     ///
     /// 歌名相同而歌手不符，基本就是同名的另一首歌——网易云上叫「春夢」的条目有四首，
     /// 分属 May'n / 倒车入库 / 中川孝 / 初音ミク，拿错的那首冒充比不显示歌词更糟。
     /// 光靠排序不够：排前面的候选可能因为没歌词被跳过，兜底就落到歌手不符的那首上。
-    /// 一个都对不上时（SMTC 的歌手写法与曲库不一致）才放开，按歌名分数照原顺序试。</summary>
+    /// 一个都对不上时（SMTC 的歌手写法与曲库不一致）才放开，按歌名分数照原顺序试。
+    /// 放开挑出来的结果要标成 ArtistMismatch：它也可能只是同名翻唱，FetchAsync 会先问完别的源。</summary>
     private static List<T> PreferArtistMatched<T>(List<T> scored, Func<T, bool> artistMatched)
         => scored.Any(artistMatched) ? scored.Where(artistMatched).ToList() : scored;
+
+    // 多歌手分隔符：各家写法不一（SMTC 常是 "A/B"，酷狗 "A、B"，还有逗号、分号、feat.）。
+    // 故意不拆 "&"、"x"、"×"、"and"、"with"：它们常是组合名本身的一部分
+    // （"Simon & Garfunkel"、"Lil Nas X"），拆开反而把一个名字切成两个互不相干的碎片。
+    // feat/ft 要求前有词边界、后跟空白，免得切到 "Daft"、"Swift" 这种词中间
+    [GeneratedRegex(@"[/／、,，;；|｜]|\b(?:feat|ft)\.?\s+|\bfeaturing\s+",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex ArtistSeparatorRegex();
+
+    /// <summary>把歌手串拆成单个歌手，并逐个做匹配用归一化（繁简、全角、大小写、去标点）。</summary>
+    private static List<string> SplitArtists(string s)
+        => ArtistSeparatorRegex().Split(s)
+            .Select(NormalizeForMatch)
+            .Where(x => x.Length > 0)
+            .ToList();
+
+    /// <summary>歌手宽松匹配，三家曲库共用：SMTC 的歌手串与候选的任一歌手名，
+    /// 拆成单个歌手、归一化之后，只要有一对相等或一方包含另一方就算对上。
+    ///
+    /// 原先三处各写各的，都拿原始字符串做 OrdinalIgnoreCase 的相等/包含：
+    /// 「周杰倫」对不上「周杰伦」、"A/B" 对不上 QQ 拼出来的 "B A"、酷狗的 "A、B"，
+    /// 歌手闸一失灵，PreferArtistMatched 就放开到同名翻唱里去挑（抓错版本的根因之一）。
+    /// 包含判断保留原来的宽松度（SMTC 常带变体名，如 "Jay Chou 周杰倫"），
+    /// 但放在拆开之后逐个比，不会跨分隔符把两个歌手名拼成的串拿去误中第三个名字。
+    /// 任一侧拆完是空的（空串、纯标点）一律不算匹配：空串是任何串的子串。</summary>
+    private static bool ArtistMatches(IEnumerable<string> candidateNames, string artist)
+    {
+        var want = SplitArtists(artist);
+        if (want.Count == 0) return false;
+        foreach (var name in candidateNames)
+            foreach (var p in SplitArtists(name))
+                foreach (var w in want)
+                    if (p == w || p.Contains(w) || w.Contains(p)) return true;
+        return false;
+    }
+
+    // 版本标签：翻唱、现场、伴奏、remix 这类「同名不同版」。英文词两侧要求不是字母，
+    // 免得 "Alive" 里的 live、"Instant" 里的 inst 被当成标签；繁简两种写法都列上，
+    // 因为这里对的是原始歌名（归一化会去掉空白标点，英文词边界就没了）。
+    // 不笼统地罚一切「某某 ver.」「某某版」（"Full ver."、「完整版」常常正是要找的那个），
+    // 只列重新编曲、重新录过或变速的：它们的时间轴跟原曲对不上。
+    // 实测「晩餐歌 / tuki.」：网易云按搜索顺序排在前面的是「晩餐歌(acoustic ver.)」和
+    // 「晩餐歌 (弾き語りver)」，跟录音室版「晩餐歌 - Bansanka」同为包含档，原先挑中的是 acoustic 版
+    [GeneratedRegex(@"(?<![a-z])(?:live|inst(?:rumental)?|dj|remix(?:ed)?|cover|karaoke"
+        + @"|acoustic|unplugged|piano|sped\s*up|speed\s*up|nightcore|slowed)(?![a-z])"
+        + @"|现场|現場|伴奏|纯音乐|純音樂|翻唱|弾き語り|弹唱|彈唱|アコースティック|ピアノ|钢琴版|鋼琴版"
+        + @"|加速版|降速版|慢速版",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex VersionTagRegex();
+
+    /// <summary>歌名里出现的版本标签，同类写法归成一个：SMTC 写「现场」、候选写 "Live" 算同一种。</summary>
+    private static HashSet<string> VersionTagsOf(string s)
+    {
+        var tags = new HashSet<string>();
+        foreach (Match m in VersionTagRegex().Matches(s))
+            tags.Add(m.Value.ToLowerInvariant() switch
+            {
+                "现场" or "現場" => "live",
+                "instrumental" or "伴奏" or "纯音乐" or "純音樂" or "karaoke" => "inst",
+                "remixed" => "remix",
+                "翻唱" => "cover",
+                "unplugged" or "弾き語り" or "弹唱" or "彈唱" or "アコースティック" => "acoustic",
+                "ピアノ" or "钢琴版" or "鋼琴版" => "piano",
+                "nightcore" or "加速版" => "fast",
+                "slowed" or "降速版" or "慢速版" => "slow",
+                // sped up / speed up 中间的空白写法不一，按前缀归
+                var v when v.StartsWith("sped") || v.StartsWith("speed") => "fast",
+                var v => v,
+            });
+        return tags;
+    }
 
     /// <summary>匹配用归一化：全角转半角、繁体转简体、小写化，只留字母和数字（忽略空白与标点差异）。
     ///
@@ -1088,12 +1363,24 @@ public static partial class Lyrics
 
     // ---- 总入口 ----
 
-    /// <summary>抓取结果：歌词行 + 逐字时间表 + 命中的源名 + 曲库登记的歌曲时长（秒，未知为 0）。</summary>
+    /// <summary>抓取结果：歌词行 + 逐字时间表 + 命中的源名 + 曲库登记的歌曲时长（秒，未知为 0）。
+    ///
+    /// Degraded：这份结果因为某一步「请求失败」（而不是「确实没有」）打了折扣——网易云首选
+    /// 候选的歌词接口失败只好用了次选候选，或开了逐字但酷狗 KRC 请求失败。这种结果不写缓存，
+    /// 否则一次网络抖动会把次优结果冻结 30 天。落到 QQ/LRCLIB 备选源不置位：那条路本来就不缓存。
+    /// PrimaryNotFound：网易云正常应答、确实没有这首歌（不是限流/风控/网络异常）。调用方据此
+    /// 不再为「等网易云恢复」而重试——即使备选源给了歌词，这个标志也照样带着。
+    /// ArtistMismatch：各源都没有歌手对得上的版本，这是放开歌手闸退回来的备胎（可能是翻唱），
+    /// 调用方给它排最低一档，重试拿到歌手对得上的任何结果都该顶掉它。
+    /// 这几个字段只能追加在末尾且带默认值：缓存读取和调用方都还在用前四个参数的构造。</summary>
     public readonly record struct FetchResult(
         List<LyricLine>? Lines,
         Dictionary<int, List<KaraokeWord>> Karaoke,
         string Source,
-        double SongDurationS);
+        double SongDurationS,
+        bool Degraded = false,
+        bool PrimaryNotFound = false,
+        bool ArtistMismatch = false);
 
     /// <summary>依次尝试各歌词源。
     /// 逐字表：{主行时间ms: 逐字}，取不到或匹配不上时为空 dict（退化为逐行显示）。
@@ -1108,6 +1395,15 @@ public static partial class Lyrics
 
         SourceResult? found = null;
         var sourceName = "";
+        // 网易云正常应答说「没有这首歌」：哪怕后面备选源给了歌词也要带出去，
+        // 调用方靠它判断还值不值得为「等网易云恢复」重试
+        var primaryNotFound = false;
+        // 歌手对不上的结果先存着不用（见循环里的注释），各源都问完了才轮到它
+        SourceResult? fallback = null;
+        var fallbackName = "";
+        var neteaseMismatch = false;
+        // 有源请求失败（不是「确实没有」）：退回备胎时据此判断那是不是最终答案
+        var anyFailed = false;
         var sources = new (string Name, Func<Task<SourceResult?>> Fetch)[]
         {
             ("_fetch_netease", () => FetchNeteaseAsync(title, artist, durationS, secondLine)),
@@ -1117,39 +1413,75 @@ public static partial class Lyrics
         foreach (var (name, fetch) in sources)
         {
             try { found = await fetch(); }
-            catch { found = null; } // 单个源网络异常不致命，换下一个
-            if (found is { Lines.Count: > 0 })
+            catch { found = null; anyFailed = true; } // 单个源网络异常不致命，换下一个
+            // 网易云返回 null 也是请求失败（「确实没有」走的是 NotFound），QQ/LRCLIB 的 null 才是没有
+            if (name == "_fetch_netease" && found == null) anyFailed = true;
+            if (name == "_fetch_netease" && found is { NotFound: true }) primaryNotFound = true;
+            if (found is not { Lines.Count: > 0 }) continue;
+            if (!found.ArtistMismatch)
             {
                 sourceName = name;
                 break;
             }
+            // 歌手对不上的先存成备胎，接着问下一个源：网易云缺版权的歌（「告白氣球」）
+            // 搜出来全是同名翻唱，而 QQ / LRCLIB 手里就有原唱。
+            // 几个备胎之间默认留先到的（网易云带译文），只有后来的时长明显更贴近 SMTC 才换：
+            // SMTC 报「Jay Chou」而 LRCLIB 也没收这个写法时，各家都对不上「周杰伦」，
+            // 这时靠时长认出 QQ 的 215s 原唱，而不是网易云那个 228s 的翻唱；
+            // 差个零点几秒不算数，免得为此丢掉译文
+            if (name == "_fetch_netease") neteaseMismatch = true;
+            if (fallback == null || (durationS > 0 && Math.Abs(found.DurationS - durationS) + 5
+                    < Math.Abs(fallback.DurationS - durationS)))
+                (fallback, fallbackName) = (found, name);
+            found = null;
         }
+        // 各源都没有歌手对得上的：退回备胎。这是为 SMTC 歌手写法和曲库不一致（「Jay Chou」
+        // 对「周杰伦」）留的退路，放在各源都问过之后，不再让某一家的翻唱抢在别家的原唱前面
+        var usedFallback = found is not { Lines.Count: > 0 } && fallback != null;
+        if (usedFallback) (found, sourceName) = (fallback, fallbackName);
+        // 网易云只有歌手对不上的版本，等同于「确实没有这首歌」：再抓它也还是那几个翻唱，
+        // 调用方不必为它重试。例外是退回备胎时有源请求失败了——重试还有指望从那个源拿到原唱
+        if (neteaseMismatch && !(usedFallback && anyFailed)) primaryNotFound = true;
         if (found is not { Lines.Count: > 0 })
-            return new FetchResult(null, new Dictionary<int, List<KaraokeWord>>(), "", 0);
+            return new FetchResult(null, new Dictionary<int, List<KaraokeWord>>(), "", 0,
+                PrimaryNotFound: primaryNotFound);
         var lines = found.Lines;
 
-        // 过滤制作信息行（作词/编曲/制作人等不是歌词，不该占用任务栏）。
+        // 过滤制作信息行（作词/编曲/制作人等不是歌词，不该占用任务栏），判定见 CreditMask。
         // 滤掉超过六成就认定是正则误伤（正常歌曲的制作信息只占开头几行），整份留原样：
         // 宁可多显示几行制作信息，也不能把歌词本身滤成残缺的
-        // 译文轨也查一遍：有些投稿把制作信息塞在翻译那一行上（正文是作品名、
-        // 译文写「作詞：某某 作曲：某某」），只看正文会漏掉整行
-        var filtered = lines.Where(l => !CreditLineRegex().IsMatch(l.Text)
-            && !(l.Trans != null && CreditLineRegex().IsMatch(l.Trans))).ToList();
+        var credit = CreditMask(lines.Select(l => l.Text).ToList(),
+            lines.Select(l => l.Trans).ToList(), title, artist);
+        var filtered = lines.Where((_, i) => !credit[i]).ToList();
         if (filtered.Count > 0 && filtered.Count >= lines.Count * 0.4) lines = filtered;
 
         var karaoke = new Dictionary<int, List<KaraokeWord>>();
+        // 退回备胎时有源请求失败：这份翻唱只是「这次没拿到原唱」，同样按降级处理、不进缓存
+        var degraded = found.Degraded || (usedFallback && anyFailed);
         if (withKaraoke)
         {
+            // 「请求失败」和「酷狗确实没有 / 对不上」必须分开：前者是网络抖动，这份结果
+            // 缺了逐字只是暂时的，得标成降级、不进缓存，等下次重抓补上；后者（返回 null、
+            // 或抓到了但对齐闸没过）是这首歌的正常结果，可以放心缓存。
+            // 原先两者一起被一个 catch 吞掉，一次超时就把「没有逐字」冻结进缓存 30 天
+            List<KrcLine>? krc = null;
             try
             {
-                var krc = await FetchKugouKaraokeAsync(title, artist, durationS);
+                krc = await FetchKugouKaraokeAsync(title, artist, KugouDurationOf(durationS, found.DurationS));
+            }
+            catch
+            {
+                // 网络异常、非 JSON 应答、状态码不正常（限流/风控）、KRC 解码失败都算「没拿到」而不是「没有」
+                degraded = true;
+            }
+            try
+            {
                 if (krc is { Count: > 0 })
                 {
                     // KRC 侧也得滤制作信息：它开头那几行（「歌手 - 歌名」、「作词：…」、
-                    // 「编曲：…」）同样带着逐字时间戳，一旦拿 KRC 当文本主体就会显示到任务栏上。
-                    // 标题行只在开头几行查：往后再出现同名文本就是副歌在唱曲名了
-                    var kept = krc.Where((k, i) => !CreditLineRegex().IsMatch(k.Plain)
-                        && !(i < 4 && LooksLikeTitleLine(k.Plain, title, artist))).ToList();
+                    // 「编曲：…」）同样带着逐字时间戳，一旦拿 KRC 当文本主体就会显示到任务栏上
+                    var krcCredit = CreditMask(krc.Select(k => k.Plain).ToList(), null, title, artist);
+                    var kept = krc.Where((_, i) => !krcCredit[i]).ToList();
                     if (kept.Count > 0 && kept.Count >= krc.Count * 0.4) krc = kept;
 
                     var al = AlignLines(lines, krc);
@@ -1172,14 +1504,24 @@ public static partial class Lyrics
             }
             catch
             {
+                // 对齐本身出异常是算法问题，重抓也还是同一份数据，按「对不上」处理不标降级
                 karaoke = new Dictionary<int, List<KaraokeWord>>(); // 逐字失败不影响逐行
             }
         }
-        var result = new FetchResult(lines, karaoke, sourceName, found.DurationS);
-        // 只缓存首选源的结果：落到备选源说明首选源当时抓失败了（多半是网络抖动），
+        var result = new FetchResult(lines, karaoke, sourceName, found.DurationS, degraded, primaryNotFound,
+            usedFallback);
+        // 只缓存首选源的完整结果：落到备选源说明首选源当时抓失败了（多半是网络抖动），
         // 那是调用方 5s 后要重试自愈的情况，写进缓存等于把「没有译文的次优结果」
-        // 永久冻结，重试也只会一遍遍读到同一份坏缓存
-        if (useCache && sourceName == "_fetch_netease")
+        // 永久冻结，重试也只会一遍遍读到同一份坏缓存。
+        // 降级结果同理：网易云首选候选的歌词请求失败而用了次选候选，或逐字请求失败，
+        // 都是「这次没拿到」而不是「本来就这样」，同样不能冻结。
+        // 已知代价：开着逐字而酷狗长期连不上（它的三个接口都是明文 http，海外网络、拦 http 的
+        // 代理/防火墙下每次都超时）时，每首歌都被标成降级——一律不进缓存（切歌瞬间出词、
+        // 断网照样有词都不再成立），调用方每首歌还会多重试 2 遍、每遍白等酷狗超时。
+        // 这类用户关掉逐字即可恢复缓存。
+        // 网易云的备胎（歌手对不上）只有在各源都干净地答过「没有原唱」时才缓存（上面 degraded 已把
+        // 「有源请求失败」排除掉）：那是 SMTC 歌手写法与曲库不一致的歌，每次重抓都是同一个结果
+        if (useCache && sourceName == "_fetch_netease" && !degraded)
             LyricsCache.Save(cacheKey, result);
         return result;
     }
@@ -1201,15 +1543,17 @@ public static partial class Lyrics
     // ---- 命令行验证入口（对应 Python 的 __main__）----
 
     /// <param name="secondLine">第二行内容：translation / romaji / off，与设置页同名。</param>
+    /// <param name="durationS">模拟 SMTC 上报的时长（秒）。省略为 0，相当于网易云客户端（它不报 timeline）；
+    /// 会报时长的播放器（QQ 音乐、Spotify）要走时长闸，有的问题只在那条路上出现（「告白氣球」抓到翻唱）。</param>
     public static async Task RunConsoleTestAsync(string title, string artist,
-        string secondLine = "translation")
+        string secondLine = "translation", double durationS = 0)
     {
         // 诊断入口一律绕过缓存：否则改完匹配算法再来验证，读到的还是上次的结果
-        var (found, karaoke, source, songDur) =
-            await FetchAsync(title, artist, secondLine: secondLine, useCache: false);
+        var (found, karaoke, source, songDur, degraded, primaryNotFound, artistMismatch) =
+            await FetchAsync(title, artist, durationS, secondLine: secondLine, useCache: false);
         if (found == null)
         {
-            Console.WriteLine("没找到歌词");
+            Console.WriteLine(primaryNotFound ? "没找到歌词（网易云确实没有这首歌）" : "没找到歌词");
             return;
         }
         var hasTrans = found.Count(l => l.Trans != null);
@@ -1222,11 +1566,15 @@ public static partial class Lyrics
         Console.WriteLine($"... 共 {found.Count} 行，其中 {hasTrans} 行带译文，"
             + $"{karaoke.Count} 行带逐字（{karaoke.Count * 100.0 / found.Count:F0}%）"
             + $"（来源 {source}，曲库时长 {songDur:F0}s）");
+        // 这几个标志决定这份结果会不会进缓存、调用方还重不重试，诊断时一并亮出来
+        if (degraded) Console.WriteLine("  [降级] 有一步请求失败，这份结果不会写缓存");
+        if (primaryNotFound) Console.WriteLine("  [网易云确实没有这首歌，或只有歌手对不上的版本] 调用方不再为它重试");
+        if (artistMismatch) Console.WriteLine("  [歌手对不上] 各源都没有这位歌手的版本，退回了同名的备胎（可能是翻唱）");
 
         // 主歌词侧对照（不抓逐字，拿到的就是网易云原样的行集）：反转成以 KRC 为文本主体后
         // 译文是靠跨源配对挂回来的，某行缺译文有两种完全不同的成因——网易云自己的译文轨
         // 就没对上这行（MergeTranslation 的时间容差），或者跨源配对没把它挂上。两侧一比即分晓
-        var (raw, _, _, _) = await FetchAsync(title, artist, withKaraoke: false,
+        var (raw, _, _, _, _, _, _) = await FetchAsync(title, artist, durationS, withKaraoke: false,
             secondLine: secondLine, useCache: false);
         if (raw != null)
         {
@@ -1239,8 +1587,9 @@ public static partial class Lyrics
         // KRC 侧对照：逐字数据本身是全曲每行都有的，配对率低有两种完全不同的成因——
         // 阈值太严（放宽能救）或两源断句粒度不同（酷狗把主歌词两行并成一行唱，
         // 单调对齐 1:1 挂不过来，放宽阈值也救不了）。行数与行长的对比能区分这两种
+        // 时长取值与正式路径同一个函数：没给时长时相当于网易云客户端 durationS 恒为 0，退回曲库时长
         List<KrcLine>? krc = null;
-        try { krc = await FetchKugouKaraokeAsync(title, artist, songDur); }
+        try { krc = await FetchKugouKaraokeAsync(title, artist, KugouDurationOf(durationS, songDur)); }
         catch { /* 逐字源抓失败不影响上面的主歌词诊断 */ }
         if (krc is not { Count: > 0 })
         {

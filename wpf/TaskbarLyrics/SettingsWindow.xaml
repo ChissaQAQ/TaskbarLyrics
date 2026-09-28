@@ -573,6 +573,53 @@
                                     <Button x:Name="BlockButton" Grid.Column="1" HorizontalAlignment="Right"
                                             VerticalAlignment="Center" Padding="12,5" Click="BlockButton_Click"/>
                                 </Grid>
+                                <Border Style="{StaticResource RowSeparator}"/>
+                                <Grid Style="{StaticResource Row}">
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Style="{StaticResource RowTitle}" Text="已屏蔽的播放器"/>
+                                        <TextBlock x:Name="BlockedDescText" Style="{StaticResource RowDesc}"/>
+                                    </StackPanel>
+                                </Grid>
+                                <!-- 名单逐条列出、逐条解除：被屏蔽的播放器永远当不上「当前播放器」，
+                                     上面那个按钮只能屏蔽、解除不了它（浏览器默认就在名单里） -->
+                                <ItemsControl x:Name="BlockedList" Focusable="False">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <StackPanel>
+                                                <Border Style="{StaticResource RowSeparator}"/>
+                                                <Grid Style="{StaticResource Row}">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock Style="{StaticResource RowTitle}" Text="{Binding}" ToolTip="{Binding}"
+                                                               VerticalAlignment="Center" Margin="12,0,16,0"
+                                                               TextTrimming="CharacterEllipsis"/>
+                                                    <Button Grid.Column="1" Content="取消屏蔽" Tag="{Binding}"
+                                                            HorizontalAlignment="Right" VerticalAlignment="Center"
+                                                            Padding="12,5" Click="UnblockButton_Click"/>
+                                                </Grid>
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
+                        </Border>
+                        <TextBlock Style="{StaticResource CardHeader}" Text="缓存"/>
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <Grid Style="{StaticResource Row}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                                        <TextBlock Style="{StaticResource RowTitle}" Text="歌词缓存"/>
+                                        <TextBlock x:Name="CacheStatusText" Style="{StaticResource RowDesc}"
+                                                   Text="抓到的歌词会在本地存 30 天，再听同一首不用联网；抓错了版本可清空后重新获取"/>
+                                    </StackPanel>
+                                    <Button x:Name="ClearCacheButton" Grid.Column="1" Content="清空歌词缓存"
+                                            HorizontalAlignment="Right" VerticalAlignment="Center" Padding="12,5"
+                                            Click="ClearCacheButton_Click"/>
+                                </Grid>
                             </StackPanel>
                         </Border>
                     </StackPanel>

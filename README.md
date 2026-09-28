@@ -109,7 +109,8 @@ dotnet publish wpf/TaskbarLyrics -c Release -r win-x64 --self-contained false `
   -p:PublishSingleFile=true -o wpf/publish
 
 # 歌词抓取控制台验证（不走缓存，直接打真实抓取结果和译文覆盖率）
-wpf/publish/TaskbarLyrics.exe --lyrics-test "歌名" "歌手" [translation|romaji|off]
+# 时长秒模拟播放器上报的时长：省略 / 0 即网易云客户端，QQ 音乐、Spotify 这类会报
+wpf/publish/TaskbarLyrics.exe --lyrics-test "歌名" "歌手" [translation|romaji|off] [时长秒]
 
 # 检查更新诊断：打印检查结果与 GitHub 剩余配额（「检查失败」时先跑这个）
 wpf/publish/TaskbarLyrics.exe --update-test

@@ -71,6 +71,8 @@ public partial class OverlayWindow : Window
     // 合并成尾沿触发：一串事件只排一次重摆，并等前台切换的布局抖动落定后再摆
     private readonly System.Windows.Threading.DispatcherTimer _dockCoalesce =
         new() { Interval = TimeSpan.FromMilliseconds(120) };
+    // 上次看到的「任务栏按钮窗口集合」指纹：前台切换只在它变了时才催后台重测空档（见 _dockCoalesce.Tick）
+    private ulong _taskbarFingerprint;
 
     private bool _dragging;
     private NativeMethods.POINT _dragCursor0;
@@ -130,6 +132,17 @@ public partial class OverlayWindow : Window
         _dockCoalesce.Tick += (_, _) =>
         {
             _dockCoalesce.Stop();
+            // 前台窗口变了不等于任务栏按钮变了：来回切窗口、最小化还原都不增减按钮。
+            // 原先每个前台事件都 Nudge，60s 退避几乎从不生效，UIA 泄漏照漏
+            // （按每天活跃 8 小时估约 40-130MB/天）。这里先用 EnumWindows 算个便宜的
+            // 指纹，只有「会上任务栏的顶层窗口」集合真的变了才催后台重测。
+            // 窗口隐藏/非避让时 Dock 已经把枚举停了，这时 Nudge 也只是空转，不必管
+            var fp = NativeMethods.TaskbarWindowsFingerprint();
+            if (fp != _taskbarFingerprint)
+            {
+                _taskbarFingerprint = fp;
+                TaskbarFreeSpace.Nudge();
+            }
             Dock();
         };
         _hoverPoll.Tick += (_, _) => PollHover();
@@ -139,9 +152,7 @@ public partial class OverlayWindow : Window
     /// <summary>排一次合并后的重摆（已排队则忽略，一串前台事件只摆一次）。</summary>
     private void QueueDock()
     {
-        // 前台窗口变了 → 任务栏按钮很可能增减了，催后台线程立刻重测空档。
-        // 静止期的 UIA 枚举退避到 60s 心跳（防原生内存泄漏），全靠这个信号保持跟手
-        TaskbarFreeSpace.Nudge();
+        // 这里只负责合并排队；是否催后台重测空档由 Tick 里的窗口集合指纹决定
         if (_dockCoalesce.IsEnabled) return;
         _dockCoalesce.Start();
     }
@@ -683,10 +694,12 @@ public partial class OverlayWindow : Window
         }
     }
 
+    /// <summary>窗口此刻应不应该显示。暂停超时时即使还没到第一句歌词，也显示歌曲信息（歌名/歌手）。</summary>
+    private bool WantVisible => (_hasContent || _infoMode) && !_fsHidden;
+
     private void UpdateVisibility()
     {
-        // 暂停超时时即使还没到第一句歌词，也显示歌曲信息（歌名/歌手）
-        var show = (_hasContent || _infoMode) && !_fsHidden;
+        var show = WantVisible;
         // 用 Win32 ShowWindow 直接控制：手动 SetParent 后 WPF 的 Visibility
         // 属性与 Win32 的 WS_VISIBLE 会脱钩（WPF 认为可见但窗口实际不显示）
         if (_hwnd != IntPtr.Zero)
@@ -757,9 +770,18 @@ public partial class OverlayWindow : Window
                 // 最小可接受宽度按「收掉封面后的文字底线」算：宁可先牺牲封面，
                 // 也不要为了留住封面把整条挤到读不了的宽度
                 var minDip = MinContentDip + buttonsZone + GapPad * 2 / dpi;
-                var gap = TaskbarFreeSpace.FindBestGap(
-                    trayHwnd, _hwnd, (int)Math.Round(wantDip * dpi), (int)Math.Round(minDip * dpi),
-                    CurrentTrayX(trayHwnd), Cfg.AutoSide);
+                (int L, int R)? gap = null;
+                // 还一次空档都没拿到时（启动期窗口通常是藏着的）照常测：否则第一句歌词出来时
+                // 手上没有快照，窗口会先按默认位置摆出来再跳进空档
+                if (WantVisible || !_autoGap.HasValue)
+                    gap = TaskbarFreeSpace.FindBestGap(
+                        trayHwnd, _hwnd, (int)Math.Round(wantDip * dpi), (int)Math.Round(minDip * dpi),
+                        CurrentTrayX(trayHwnd), Cfg.AutoSide);
+                else
+                    // 窗口藏着（没在放歌、全屏隐藏）时没人看空档，让后台停止枚举，别白漏 UIA 内存。
+                    // 不走 FindBestGap（它会把目标设回来）；重新显示后下一次 Dock 设回目标，
+                    // SetTargets 发现目标变了会自己 Nudge 立刻重测。_autoGap 保留，显示时先按旧空档摆
+                    TaskbarFreeSpace.SetTargets(IntPtr.Zero, IntPtr.Zero);
                 if (gap.HasValue) _autoGap = gap.Value; // 失败则沿用旧空档，不回退跳位
                 if (_autoGap.HasValue)
                 {

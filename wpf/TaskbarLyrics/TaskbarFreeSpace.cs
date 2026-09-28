@@ -9,6 +9,7 @@
 // 直接停摆），更要命的是我们的窗口是 Shell_TrayWnd 的子窗口：我们等 explorer 回应
 // UIA，explorer 又可能正在向我们的子窗口发同步消息，双向等待就是整个任务栏卡死。
 // 微软的 UI Automation 线程指南也明确要求客户端不要在 UI 线程调用 UIA。
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Automation;
 
@@ -36,11 +37,15 @@ public static class TaskbarFreeSpace
     // 工作线程超过这么久没开始新一轮，就是卡在某次 UIA 调用里出不来了。
     // UIA 是同步跨进程调用 explorer 且没有超时：explorer 的 UI 线程一被别的东西堵住，
     // 这个调用能挂上几分钟甚至再也不返回，而快照就此冻结在挂住的那一刻。
-    // 判据要留足余量——静止期本来就要 MaxRefreshMs 才醒一次，不能把正常心跳当成卡死
+    // 判据要留足余量——静止期本来就要 MaxRefreshMs 才醒一次，不能把正常心跳当成卡死。
+    // 这是首次判定的阈值，连续接手后逐次翻倍（见 Watchdog）
     private const int StuckAfterMs = MaxRefreshMs + 30_000;
-    // 最多让新线程接手几次。挂住的那次 UIA 调用不可取消（同步跨进程 COM，
+    // 最多让新线程「连续」接手几次。挂住的那次 UIA 调用不可取消（同步跨进程 COM，
     // .NET Core 也没有 Thread.Abort），旧线程只能挂着自生自灭，每条都占着资源，
-    // 所以得封顶：真到了这一步已经是 explorer 侧的问题，再堆线程也换不回结果
+    // 所以得封顶：真到了这一步已经是 explorer 侧的问题，再堆线程也换不回结果。
+    // 「连续」是指中间没有一轮正常完成——一旦正常完成就清零（见 MarkOk）。
+    // 原先是终身额度：实测一次 explorer 抽风 3 分钟内接手 3 次就烧光了，
+    // 之后整个进程生命期内再卡死都不接手，窗口永远钉在旧空档上
     private const int MaxRevives = 3;
     // 判定卡死前要连续确认几轮（Watchdog 由 Dock 驱动，1.5s 一轮）。
     // 唯一目的是排掉睡眠唤醒这类假象，不必等太久
@@ -53,7 +58,11 @@ public static class TaskbarFreeSpace
     // 工作线程的代号。卡死换线程时递增：挂住的旧线程哪天返回了，一看代号变了就自行退场，
     // 不许再发布快照（它手上那份结果已经是几分钟前的现场了），也不许再碰 Wake
     private static volatile int _gen;
+    // 连续接手次数：UI 线程（Watchdog）加、工作线程（MarkOk）清，所以走 Interlocked
     private static int _revives;
+    // 接手额度用尽的日志单独一个标志，不能和 _staleLogged 共用：先前的停产日志
+    // 已经把 _staleLogged 置上的话，「额度用尽」这条最要紧的就被吞了，事后一个字都查不到
+    private static volatile bool _exhaustLogged;
     // 这两个时间戳是这套东西唯一的可观测性来源，用 TickCount64（单调、不受改系统时间影响）：
     // _beatMs 是每轮循环开始的时刻（不动 = 线程卡在 UIA 里），
     // _lastOkMs 是最近一次真的拿到结果的时刻（不动 = 枚举还在跑但从此不产出结果）。
@@ -118,6 +127,9 @@ public static class TaskbarFreeSpace
     private static void WorkerLoop(object? state)
     {
         var myGen = (int)state!;
+        // 连续失败次数（异常、空树、任务栏句柄失效都算）。只有本线程读写，放局部变量即可；
+        // 接手的新线程从 0 重新算，正好对应「换了线程先快速试一下」
+        var fails = 0;
         while (!_stop)
         {
             // 被接手过就立刻退场：这条线程手上的结果早已过期，而且它一旦去 Reset(Wake)
@@ -128,25 +140,37 @@ public static class TaskbarFreeSpace
             var tray = _wantTray;
             if (tray != IntPtr.Zero)
             {
-                try { Measure(tray, _wantExclude, myGen); }
+                var ok = false;
+                try { ok = Measure(tray, _wantExclude, myGen); }
                 catch { /* UIA 整体失败：保留上一份快照，调用方沿用旧空档不跳位 */ }
+                if (ok) fails = 0;
+                else if (myGen == _gen) // 被接手的旧线程别去改接手线程的节奏，下一圈顶上就退场了
+                {
+                    // 失败退避：第一次失败 1s 后就重试（多半是任务栏更新时元素瞬断），
+                    // 之后 2s、4s……封顶 60s。原先两头都不对：单次失败不动周期，
+                    // 静止期正退在 60s 时一次瞬断就要干等一分钟；持续失败超过看护阈值后
+                    // 又被 MarkStale 钉回每秒一次，每一轮都照样漏 UIA 的原生内存。
+                    // 真有变化时 Nudge() 仍会立刻叫醒重试一次
+                    fails++;
+                    _idleMs = (int)Math.Min(MaxRefreshMs, (long)FastRefreshMs << Math.Min(fails - 1, 16));
+                }
             }
             Wake.Wait(_idleMs);
         }
     }
 
-    /// <summary>枚举一遍任务栏，算出占用区间并发布快照。</summary>
-    private static void Measure(IntPtr tray, IntPtr exclude, int myGen)
+    /// <summary>枚举一遍任务栏，算出占用区间并发布快照。返回这一轮是否真的拿到了结果。</summary>
+    private static bool Measure(IntPtr tray, IntPtr exclude, int myGen)
     {
-        if (!NativeMethods.GetClientRect(tray, out var rc) || rc.Right <= 0) return;
+        if (!NativeMethods.GetClientRect(tray, out var rc) || rc.Right <= 0) return false;
         NativeMethods.GetWindowRect(tray, out var wrc);
         var raw = new List<(int L, int R)>();
         // UIA 的 NativeWindowHandle 是 int：64 位下句柄本就是截断后塞进去的，
         // 这里也必须按截断比较。原先在循环里用 IntPtr.ToInt32()，句柄一旦超出 int 范围
         // 就抛 OverflowException，被外层 catch 吞掉后自己的窗口反倒被算成占用区、把自己挤走
         Collect(AutomationElement.FromHandle(tray), rc.Right, wrc.Left,
-            unchecked((int)exclude.ToInt64()), raw);
-        if (raw.Count == 0) return; // 查询没结果时不覆盖上一份成功的快照
+            unchecked((int)exclude.ToInt64()), IsXamlTaskbar(tray), raw);
+        if (raw.Count == 0) return false; // 查询没结果时不覆盖上一份成功的快照
 
         raw.Sort((a, b) => a.L.CompareTo(b.L));
         var merged = new List<(int L, int R)>();
@@ -166,12 +190,13 @@ public static class TaskbarFreeSpace
         {
             _idleMs = Math.Min(MaxRefreshMs, _idleMs * 2);
             MarkOk(myGen);
-            return;
+            return true;
         }
-        if (myGen != _gen) return; // 挂了很久才返回的旧线程，不许拿过期结果覆盖接手线程的快照
+        if (myGen != _gen) return false; // 挂了很久才返回的旧线程，不许拿过期结果覆盖接手线程的快照
         _idleMs = FastRefreshMs; // 有变化：回到快节奏，紧跟后续的连续变化
         _snap = new Snapshot { Tray = tray, TrayWidth = rc.Right, Occupied = merged };
         MarkOk(myGen);
+        return true;
     }
 
     /// <summary>记下「这一轮真的拿到了结果」。静止期不发布新快照，所以快照自身的新鲜度
@@ -181,6 +206,10 @@ public static class TaskbarFreeSpace
         if (myGen != _gen) return;
         Volatile.Write(ref _lastOkMs, Environment.TickCount64);
         _staleLogged = false; // 恢复了：下次再停产还要留一条日志
+        // 正常完成一遍 = 这条线程是活的，接手额度（和随之翻倍的卡死阈值）一并复原。
+        // 已经在 0 就不写，免得静止期每轮都去碰一次共享变量
+        if (Volatile.Read(ref _revives) != 0) Interlocked.Exchange(ref _revives, 0);
+        _exhaustLogged = false;
     }
 
     private static bool Same(List<(int L, int R)> a, List<(int L, int R)> b)
@@ -193,24 +222,62 @@ public static class TaskbarFreeSpace
 
     // Win10 时代的任务栏容器窗口类。Win11 把任务栏整个换成了 XAML，这些窗口还在，
     // 但报的矩形是过时的（主屏 ReBarWindow32，副屏 WorkerW + 它里面的 MSTaskListWClass，
-    // 实测这三个在副屏上报的都是同一个 385..830——那是主屏 Win10 布局的老矩形）
+    // 实测这三个在副屏上报的都是同一个 385..830——那是主屏 Win10 布局的老矩形）。
+    // 经典任务栏上它们则是包着任务按钮的真实容器：主屏 ReBarWindow32 > MSTaskSwWClass >
+    // MSTaskListWClass，副屏 WorkerW > MSTaskListWClass
     private static readonly HashSet<string> LegacyShellClasses =
-        new() { "ReBarWindow32", "WorkerW", "MSTaskListWClass" };
-    // Win11 的第一个版本是 build 22000
+        new() { "ReBarWindow32", "WorkerW", "MSTaskSwWClass", "MSTaskListWClass" };
+    // Win11 的第一个版本是 build 22000。只作结构判断不出来时的兜底，见 IsXamlTaskbar
     private static readonly bool IsWin11 = Environment.OSVersion.Version.Build >= 22000;
+    private const string XamlBridgeClass = "Windows.UI.Composition.DesktopWindowContentBridge";
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    /// <summary>这条任务栏是不是 Win11 的 XAML 任务栏（否则按经典任务栏处理）。
+    /// 按窗口结构判而不是按系统版本：Win11 上装了 ExplorerPatcher / StartAllBack 恢复经典任务栏时，
+    /// build 号照样 ≥ 22000，原先一律跳掉遗留容器，里面的按钮跟着漏掉，歌词就盖在图标上。
+    /// 先看 XAML 宿主窗口、再看遗留容器，顺序不能反：原生 Win11 上 ReBarWindow32/WorkerW
+    /// 照样在、照样 IsWindowVisible=True（见 Collect 里的说明），光凭「有可见的遗留容器」
+    /// 会把原生 Win11 误判成经典。
+    /// 每轮 Measure 现判（几次 FindWindowEx，不给 explorer 发消息，很轻）：explorer 重启、
+    /// 切换任务栏样式后结构会变，启动时算一次的静态结果会一直错下去。</summary>
+    private static bool IsXamlTaskbar(IntPtr tray)
+    {
+        // 任务栏样式是 explorer 全局的，副屏任务栏的结构不确定时拿主屏的作证
+        var primary = NativeMethods.FindWindowExW(IntPtr.Zero, IntPtr.Zero, "Shell_TrayWnd", null);
+        if (HasVisibleChild(tray, XamlBridgeClass)
+            || (primary != IntPtr.Zero && primary != tray && HasVisibleChild(primary, XamlBridgeClass)))
+            return true;
+        if (HasVisibleChild(tray, "ReBarWindow32") || HasVisibleChild(tray, "WorkerW")
+            || (primary != IntPtr.Zero && primary != tray && HasVisibleChild(primary, "ReBarWindow32")))
+            return false;
+        return IsWin11;
+    }
+
+    private static bool HasVisibleChild(IntPtr parent, string cls)
+    {
+        // 同类可能不止一个（比如先有个隐藏的），逐个看完再下结论
+        var h = IntPtr.Zero;
+        while ((h = NativeMethods.FindWindowExW(parent, h, cls, null)) != IntPtr.Zero)
+            if (IsWindowVisible(h)) return true;
+        return false;
+    }
 
     /// <summary>递归收集占用矩形：接近全宽的容器继续拆，其余元素计入占用；
     /// 本程序的覆盖窗口（按句柄排除）不算占用。
-    /// 单个元素失效（任务栏更新时元素瞬断很常见）只跳过，不拖垮整个查询。</summary>
-    private static void Collect(AutomationElement el, int trayWidth, int trayScreenLeft,
-        int excludeId, List<(int L, int R)> acc)
+    /// 单个元素失效（任务栏更新时元素瞬断很常见）只跳过，不拖垮整个查询。
+    /// 返回 false 表示连 el 的子元素都没取到。</summary>
+    private static bool Collect(AutomationElement el, int trayWidth, int trayScreenLeft,
+        int excludeId, bool xaml, List<(int L, int R)> acc)
     {
         AutomationElementCollection kids;
         try { kids = el.FindAll(TreeScope.Children, Condition.TrueCondition); }
-        catch { return; }
+        catch { return false; }
         foreach (AutomationElement k in kids)
         {
-            if (_stop) return; // 退出时不必跑完整棵树
+            if (_stop) return true; // 退出时不必跑完整棵树
             try
             {
                 var r = k.Current.BoundingRectangle;
@@ -225,17 +292,28 @@ public static class TaskbarFreeSpace
                 // IsOffscreen=False、IsWindowVisible=True——两种可见性判据都过滤不掉它。
                 // Win11 图标居中，图标一少真图标区就往中间收缩，这块不动的旧矩形
                 // 会凭空吃掉几百像素可用区（主屏是 ReBarWindow32，副屏任务栏是 WorkerW）。
-                // 按系统版本判而不是光看类名：这两个类在 Win10 上是包着整个任务列表的
+                // 按任务栏结构判而不是光看类名：这几个类在经典任务栏上是包着整个任务列表的
                 // 真实容器，跳掉的话连里面的按钮一起漏掉，窗口就会压在图标上。
                 //
                 // 这两道检查必须排在下面的「全宽容器」分支之前。遗留窗口报的矩形本来就
                 // 跟现实无关，它完全可以报出接近全宽的宽度——实测副屏 WorkerW 的 UIA 矩形
                 // 是 48..1920（w=1872，稳稳越过全宽阈值），而它 GetWindowRect 的真实矩形
                 // 只有 385..830。先命中容器分支就等于绕开了这道过滤，白留一个隐患
-                if (IsWin11 && LegacyShellClasses.Contains(k.Current.ClassName)) continue;
+                if (LegacyShellClasses.Contains(k.Current.ClassName))
+                {
+                    if (xaml) continue;
+                    // 经典任务栏上这些容器不论宽窄都要拆开。它们夹在开始按钮和通知区之间，
+                    // 原生 Win10 上 ReBarWindow32 一般只占任务栏六七成宽，够不着下面 90% 的全宽阈值，
+                    // 原先就被整块当成占用——任务列表里按钮后面那一大截空白也跟着算进去，
+                    // 等于经典任务栏上根本找不到空档。空的任务列表拆出来没有子元素，正好就是空档；
+                    // 但连子元素都取不到时不能当它是空的，退回整块算占用，宁可让位也不压图标
+                    if (!Collect(k, trayWidth, trayScreenLeft, excludeId, xaml, acc))
+                        acc.Add(((int)r.Left - trayScreenLeft, (int)r.Right - trayScreenLeft));
+                    continue;
+                }
                 if (r.Width >= trayWidth * 0.9)
                 {
-                    Collect(k, trayWidth, trayScreenLeft, excludeId, acc); // 全宽容器继续拆
+                    Collect(k, trayWidth, trayScreenLeft, excludeId, xaml, acc); // 全宽容器继续拆
                     continue;
                 }
                 acc.Add(((int)r.Left - trayScreenLeft, (int)r.Right - trayScreenLeft));
@@ -245,6 +323,7 @@ public static class TaskbarFreeSpace
                 // 该元素刚好被销毁/不可用，跳过即可
             }
         }
+        return true;
     }
 
     /// <summary>UI 侧顺手做的看护（每次 Dock 调一遍，纯读时间戳，极轻）。
@@ -257,26 +336,35 @@ public static class TaskbarFreeSpace
     /// 分两种情形，能自愈的程度不一样：
     /// 卡在 UIA 调用里出不来 → 换条线程接手，真能救回来；
     /// 线程还在转但枚举持续失败/返回空树 → UIA 就是不给结果，救不回来，
-    /// 那就拉回快节奏死等它恢复，并留一条日志让事后查得到。</summary>
+    /// 那就由工作线程按失败退避继续试（最慢 60s 一次），并留一条日志让事后查得到。</summary>
     private static void Watchdog()
     {
         var beat = Volatile.Read(ref _beatMs);
         if (beat == 0) return; // 线程还没跑起第一轮
         var now = Environment.TickCount64;
-        if (now - beat > StuckAfterMs)
+        var revives = Volatile.Read(ref _revives);
+        // 每连续接手一次，卡死判定阈值翻一倍（90s → 180s → 360s → 720s）：
+        // 刚接手的线程又卡住，说明 explorer 那边还没缓过来，这时候还按 90s 一次地弃线程，
+        // 只会在持续卡死的系统上一条接一条地堆出挂着不可取消 UIA 调用的死线程
+        var stuckAfter = (long)StuckAfterMs << Math.Min(revives, MaxRevives);
+        if (now - beat > stuckAfter)
         {
             // 先叫一声再下结论：睡眠/休眠期间 TickCount64 照走（它算的是开机时长，
             // 不是运行时长），唤醒后心跳看起来也像「很久没动」，而线程其实好得很。
             // 真卡在 UIA 调用里的线程是叫不动的，几轮之内心跳都不会挪一下
             if (_stuckBeat != beat) { _stuckBeat = beat; _stuckConfirms = 0; Nudge(); return; }
             if (++_stuckConfirms < StuckConfirms) return;
-            if (_revives >= MaxRevives)
+            if (revives >= MaxRevives)
             {
-                MarkStale($"任务栏枚举已卡死 {(now - beat) / 1000}s，接手线程已用尽"
-                    + $"（{MaxRevives} 次），窗口只能沿用旧空档");
+                // 不走 MarkStale：它的 _staleLogged 可能早被之前的停产日志置上，这条就被吞了。
+                // 线程卡着，调 _idleMs 也没意义，只留日志
+                if (_exhaustLogged) return;
+                _exhaustLogged = true;
+                Log.Note("freespace", $"任务栏枚举已卡死 {(now - beat) / 1000}s，已连续换线程接手"
+                    + $" {MaxRevives} 次仍未恢复，不再接手，窗口只能沿用旧空档（卡住的线程哪天返回了会自行恢复）");
                 return;
             }
-            _revives++;
+            revives = Interlocked.Increment(ref _revives);
             // 先把心跳记到当下：接手线程要过一会儿才写第一笔，
             // 不然下一轮（1.5s 后）会拿同一个陈旧的 beat 再判一次卡死，一路把配额烧光
             Volatile.Write(ref _beatMs, now);
@@ -284,7 +372,7 @@ public static class TaskbarFreeSpace
             _stuckConfirms = 0;
             var gen = Interlocked.Increment(ref _gen);
             Log.Note("freespace", $"任务栏枚举卡死 {(now - beat) / 1000}s，"
-                + $"第 {_revives} 次换线程接手（旧线程挂在 UIA 调用里，无法取消，只能弃置）");
+                + $"第 {revives} 次换线程接手（旧线程挂在 UIA 调用里，无法取消，只能弃置）");
             StartWorker(gen);
             return;
         }
@@ -297,7 +385,8 @@ public static class TaskbarFreeSpace
 
     private static void MarkStale(string msg)
     {
-        _idleMs = FastRefreshMs; // 死等恢复：一旦能测出来就立刻纠正位置，别再退避到 60s
+        // 这里原先会把 _idleMs 拉回 1s「死等恢复」，结果持续失败时每秒枚举一次、每次照漏内存。
+        // 失败节奏现在归 WorkerLoop 的退避管（最慢 60s 一试），这里只负责留痕
         if (_staleLogged) return;
         _staleLogged = true;     // 每次停产只记一条，否则 1.5 秒一条能把 error.log 刷满
         Log.Note("freespace", msg);

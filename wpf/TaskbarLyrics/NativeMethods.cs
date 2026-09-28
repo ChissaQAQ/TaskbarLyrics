@@ -178,6 +178,68 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool UnhookWinEvent(IntPtr hWinEventHook);
 
+    // ---- 任务栏按钮集合指纹 ----
+
+    private const long WS_EX_TOOLWINDOW = 0x00000080L;
+    private const long WS_EX_APPWINDOW = 0x00040000L;
+    private const uint GW_OWNER = 4;
+
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out int pvAttribute, int cbAttribute);
+
+    private const int DWMWA_CLOAKED = 14;
+
+    // 回调委托做成静态常驻：每次 new 一个既多分配，又得操心 P/Invoke 期间被 GC 收走。
+    // 累加器同样是静态的——只在 UI 线程（前台事件合并后的 Tick 里）调用，没有并发
+    private static readonly EnumWindowsProc FingerprintProc = FingerprintVisit;
+    private static ulong _fpSum;
+    private static int _fpCount;
+
+    private static bool FingerprintVisit(IntPtr hwnd, IntPtr _)
+    {
+        if (!IsWindowVisible(hwnd)) return true;
+        // 被 cloak 的窗口 IsWindowVisible 照样为真：其他虚拟桌面上的窗口、预启动/挂起的 UWP 窗口
+        // 都是这种状态，也都不上任务栏。不排除的话切虚拟桌面（按钮整批换掉）、打开预启动过的
+        // 设置/计算器时指纹不变，不会 Nudge
+        if (DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, out var cloaked, sizeof(int)) == 0 && cloaked != 0)
+            return true;
+        var ex = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+        // 按资源管理器的规则近似判断「会在任务栏上占一个按钮」：
+        // 工具窗不上任务栏；有 owner 的窗口只有显式带 APPWINDOW 才上
+        if ((ex & WS_EX_APPWINDOW) == 0
+            && ((ex & WS_EX_TOOLWINDOW) != 0 || GetWindow(hwnd, GW_OWNER) != IntPtr.Zero))
+            return true;
+        unchecked { _fpSum += (ulong)hwnd.ToInt64() * 0x9E3779B97F4A7C15UL; }
+        _fpCount++;
+        return true;
+    }
+
+    /// <summary>「会出现在任务栏上的顶层窗口」集合的指纹（纯 user32 调用，微秒级，不碰 UIA）。
+    /// 前台切换时用它判断任务栏按钮是否真的增减了。必须与顺序无关：EnumWindows 按 z 序给出，
+    /// 而每次切前台 z 序都会变——按顺序哈希的话指纹次次都变，等于没过滤。
+    /// 所以用逐个散列后求和（加法可交换）再混入个数。cloaked 的窗口（其他虚拟桌面、挂起的 UWP）
+    /// 不计入。只是近似：托盘图标增减看不到，由 TaskbarFreeSpace 的 60s 心跳兜底。</summary>
+    public static ulong TaskbarWindowsFingerprint()
+    {
+        _fpSum = 0;
+        _fpCount = 0;
+        EnumWindows(FingerprintProc, IntPtr.Zero);
+        return unchecked(_fpSum ^ ((ulong)_fpCount << 48));
+    }
+
     private delegate bool MonitorEnumProc(IntPtr hMonitor, IntPtr hdcMonitor, IntPtr lprcMonitor, IntPtr dwData);
 
     [DllImport("user32.dll")]
@@ -188,13 +250,31 @@ internal static class NativeMethods
 
     // ---- 窗口挂靠 ----
 
+    private const uint WM_DPICHANGED_AFTERPARENT = 0x02E3;
+
+    [DllImport("user32.dll", EntryPoint = "SendMessageW")]
+    private static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    /// <summary>换完父窗口后让 WPF 重新核对 DPI。WPF 缓存的 DPI 只在收到 WM_DPICHANGED
+    /// （顶层窗口跨显示器）或 WM_DPICHANGED_AFTERPARENT（父窗口 DPI 变了）时才更新，
+    /// 而 SetParent 换父不会触发这两个里的任何一个：混合 DPI 多屏下从主屏（150%）
+    /// 挂进副屏任务栏（100%）后，WPF 还按 150% 换算像素，窗口尺寸和空档换算全错。
+    /// 手动补发 AFTERPARENT：WPF 的处理是拿 GetDpiForWindow 跟缓存比，一样就什么都不做，
+    /// 所以多发无害。注意本轮 Dock 在换父之前已按旧 DPI 算好了像素，下一轮才完全对上</summary>
+    private static void RefreshDpiAfterReparent(IntPtr hwnd) =>
+        SendMessage(hwnd, WM_DPICHANGED_AFTERPARENT, IntPtr.Zero, IntPtr.Zero);
+
     /// <summary>把窗口挂为 parent 的子窗口（保留扩展样式，对应 Python make_child_of）。
     /// 注意保留 WS_VISIBLE 原状：可见性由 WPF Visibility 管理，
     /// 强制补 WS_VISIBLE 会把 WPF 隐藏的窗口变成有框无内容的“幽灵窗口”。</summary>
     public static void MakeChildOf(IntPtr hwnd, IntPtr parent)
     {
+        var reparented = false;
         if (GetParent(hwnd) != parent)
+        {
             SetParent(hwnd, parent);
+            reparented = true;
+        }
         long style = GetWindowLongPtr(hwnd, GWL_STYLE);
         var newStyle = (style & ~WS_POPUP) | WS_CHILD;
         if (newStyle != style) // 样式没变就不动，避免无谓的框架重算闪烁
@@ -203,13 +283,18 @@ internal static class NativeMethods
             SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         }
+        if (reparented) RefreshDpiAfterReparent(hwnd); // 样式和边框都落定后再让 WPF 按新客户区重排
     }
 
     /// <summary>恢复为独立弹出窗口（浮动模式用，对应 Python make_popup）。</summary>
     public static void MakePopup(IntPtr hwnd, bool topmost)
     {
+        var reparented = false;
         if (GetParent(hwnd) != IntPtr.Zero)
+        {
             SetParent(hwnd, IntPtr.Zero);
+            reparented = true; // 脱离任务栏回到顶层，DPI 改按窗口当前所在显示器算，同样要补一次
+        }
         long style = GetWindowLongPtr(hwnd, GWL_STYLE);
         var newStyle = (style & ~WS_CHILD) | WS_POPUP;
         if (newStyle != style)
@@ -218,6 +303,7 @@ internal static class NativeMethods
             SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         }
+        if (reparented) RefreshDpiAfterReparent(hwnd);
         long exstyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
         // 浮动窗加 NOACTIVATE：点击/拖动都不会被激活成前台窗，
         // 激活-失焦切换引起的闪烁从源头消失

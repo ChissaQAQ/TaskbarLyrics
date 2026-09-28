@@ -32,6 +32,13 @@ public sealed class MainController : IDisposable
     private volatile int _fetchedDurMs;
     private double? _retryAt;
     private int _retryCount;
+    // 这首歌当前上屏结果的排名（见 RankOf），-1 表示这首歌还没有抓取落地过。
+    // 切歌（含改设置触发的重抓）时复位：首次抓取无条件接受，之后的自愈重试只接受严格更好的
+    private int _shownRank = -1;
+    // 切歌复位（OnState，SMTC 线程）与抓取结果落地（FetchLyrics 回调，线程池）互斥。
+    // 不锁的话回调刚过完版本检查、切歌恰好在这时复位，上一首的歌词和排名就会写到新歌头上——
+    // 排名一旦被写成「网易云完整结果」，新歌自己的抓取反倒会被当成「不够好」拒掉
+    private readonly object _fetchLock = new();
     private double? _lastReplayAt; // 上次单曲循环归零的时刻（节流，理由见 UpdateLine）
     private string _coverSong = ""; // 已处理封面的歌曲
     private byte[]? _shownCoverBytes; // 已上屏的封面字节（引用比较，切歌即清、新字节即换）
@@ -196,21 +203,37 @@ public sealed class MainController : IDisposable
         var needRetry = _retryAt.HasValue && Clock.Now >= _retryAt && state.Key == _songKey;
         if (state.Key != _songKey || needRetry)
         {
-            if (state.Key != _songKey)
+            lock (_fetchLock)
             {
-                _retryCount = 0;
-                _lastReplayAt = null; // 切歌后重置单曲循环检测
-                // 切歌立即清掉旧歌词：新歌词抓到前若继续用旧表定位新歌进度，
-                // 会定位不到行而把窗口当成“无内容”隐藏（消失好几句才回来）
-                _lines = null;
-                _karaoke = new Dictionary<int, List<KaraokeWord>>();
-                _fetchedDurMs = 0; // 上一首的时长不能用来判新歌的重播
+                if (state.Key != _songKey)
+                {
+                    _retryCount = 0;
+                    _shownRank = -1; // 新歌的首次抓取无论好坏都要接受
+                    _lastReplayAt = null; // 切歌后重置单曲循环检测
+                    // 切歌立即清掉旧歌词：新歌词抓到前若继续用旧表定位新歌进度，
+                    // 会定位不到行而把窗口当成“无内容”隐藏（消失好几句才回来）
+                    _lines = null;
+                    _karaoke = new Dictionary<int, List<KaraokeWord>>();
+                    _fetchedDurMs = 0; // 上一首的时长不能用来判新歌的重播
+                }
+                _songKey = state.Key;
+                _retryAt = null;
+                FetchLyrics(state);
             }
-            _songKey = state.Key;
-            _retryAt = null;
-            FetchLyrics(state);
         }
     }
+
+    // 抓取结果的好坏排名：无歌词 0 < 歌手对不上的备胎（可能是同名翻唱）1 < 备选源（QQ/LRCLIB，没有译文）2
+    // < 网易云但打了折扣（首选候选请求失败落到次选、或逐字请求失败）3 < 网易云完整结果 4。
+    // 备胎排在备选源之下：宁可没有译文，也要原唱的时间轴——重试拿到 QQ 的原唱就该顶掉网易云的翻唱
+    private const int RankBest = 4;
+
+    private static int RankOf(Lyrics.FetchResult r) =>
+        r.Lines is not { Count: > 0 } ? 0
+        : r.ArtistMismatch ? 1
+        : r.Source != "_fetch_netease" ? 2
+        : r.Degraded ? 3
+        : RankBest;
 
     private void FetchLyrics(PlaybackState state)
     {
@@ -220,27 +243,39 @@ public sealed class MainController : IDisposable
         var secondLine = Cfg.SecondLine;
         Task.Run(async () =>
         {
-            List<LyricLine>? lines;
-            Dictionary<int, List<KaraokeWord>> karaoke;
-            string source;
-            var songDurS = 0.0;
+            Lyrics.FetchResult r;
             try
             {
-                (lines, karaoke, source, songDurS) = await Lyrics.FetchAsync(
-                    title, artist, durationS, withKaraoke, secondLine);
+                r = await Lyrics.FetchAsync(title, artist, durationS, withKaraoke, secondLine);
             }
             catch
             {
-                (lines, karaoke, source) = (null, new Dictionary<int, List<KaraokeWord>>(), ""); // 网络异常时退化为显示歌名
+                // 网络异常时退化为显示歌名
+                r = new Lyrics.FetchResult(null, new Dictionary<int, List<KaraokeWord>>(), "", 0);
             }
-            if (version != _fetchVersion || _quit) return; // 已有更新的抓取
-            _lines = lines;
-            _karaoke = karaoke;
-            _fetchedDurMs = (int)(songDurS * 1000);
-            if ((lines == null || source != "_fetch_netease") && _retryCount < 2)
+            lock (_fetchLock)
             {
-                _retryCount++;
-                _retryAt = Clock.Now + 5;
+                if (version != _fetchVersion || _quit) return; // 已有更新的抓取
+                // 重试的结果未必更好：首选源依旧失败时它拿回的是 null 或同样的备选源结果，
+                // 原先无条件覆盖，会把已经在显示的 QQ 歌词顶成「只显示歌名」。
+                // 所以一首歌的首次抓取总是接受，之后只接受严格更好的
+                var rank = RankOf(r);
+                if (_shownRank < 0 || rank > _shownRank)
+                {
+                    _shownRank = rank;
+                    _lines = r.Lines;
+                    _karaoke = r.Karaoke;
+                    _fetchedDurMs = (int)(r.SongDurationS * 1000);
+                }
+                // 还没拿到网易云的完整结果就再试。例外是网易云正常答复了「没有这首歌」、
+                // 而备选源已经有歌词在显示（比如只在 QQ 上架的歌）：再试也只会拿回同样的结果，
+                // 原先每次播放都要白跑满 3 轮、十几个请求
+                var primaryHopeless = r.PrimaryNotFound && _shownRank > 0;
+                if (_shownRank < RankBest && !primaryHopeless && _retryCount < 2)
+                {
+                    _retryCount++;
+                    _retryAt = Clock.Now + 5;
+                }
             }
         });
     }
@@ -349,10 +384,13 @@ public sealed class MainController : IDisposable
                 && unclampedMs > assumedEndMs + tolMs)
             {
                 _lastReplayAt = Clock.Now;
-                // 归位到「已经进入第二遍多少」，而不是一律归零：判定天生滞后
+                // 归位到「已经进入这一遍多少」，而不是一律归零：判定天生滞后
                 // （得等插值越过歌曲末尾才知道），归零会把这段滞后量当成永久错位
-                // 摊到整首歌上——第二遍从头到尾都比人声慢一截
-                var overMs = Math.Max(0, unclampedMs - assumedEndMs);
+                // 摊到整首歌上——第二遍从头到尾都比人声慢一截。
+                // 必须对歌长取模而不是只减一遍：超出不止一遍时（比如歌词晚到，插值早已
+                // 循环过好几遍），只减一遍的进度仍在末尾之后，歌词会一直卡在最后一句，
+                // 要等闸门放行（半首歌之后）才再往回减一遍
+                var overMs = assumedEndMs > 0 ? unclampedMs % assumedEndMs : 0;
                 state.BasePositionS = overMs / 1000.0;
                 state.BaseTime = Clock.Now;
                 posMs = Math.Max(0, overMs + Cfg.OffsetMs);
@@ -497,6 +535,9 @@ public sealed class MainController : IDisposable
     public ReleaseInfo? PendingUpdate { get; private set; }
     private bool _updating;
 
+    /// <summary>正在下载更新（托盘菜单据此把更新入口置灰）。</summary>
+    public bool IsUpdating => _updating;
+
     /// <summary>检查更新，返回状态文案；有更新时写入 PendingUpdate。</summary>
     public async Task<string> CheckForUpdateAsync()
     {
@@ -568,6 +609,19 @@ public sealed class MainController : IDisposable
         OnLyricsTick();
     }
 
+    /// <summary>让当前歌曲重新联网抓一遍歌词（设置页清空歌词缓存后用）。
+    /// 走的是切歌那条路：_songKey 一清空，下一轮 SMTC 回调（≤0.5s）就把它当新歌——
+    /// 清掉旧歌词、复位重试计数与排名，再发起抓取；缓存已经清了，这次必然走网络。
+    /// 返回是否真有一首歌在重抓，设置页据此换个说法。false 有两种：眼下没有播放会话；
+    /// 或本进程根本没在听歌（--settings 模式，没跑 Run）——正在放歌的主实例是另一个进程，
+    /// 它手里这首的歌词已在内存里，要到切歌才会重新抓。</summary>
+    public bool RefetchLyrics()
+    {
+        if (_overlay == null) return false;
+        _songKey = "";
+        return _state != null;
+    }
+
     /// <summary>系统深浅色变了：重刷装饰件配色并重建行视觉。
     ///
     /// 必须重建行：颜色是建行时冻结进 Brush 的（冻结是为了让渲染层共享资源），
@@ -587,21 +641,46 @@ public sealed class MainController : IDisposable
 
     public string CurrentSourceId() => _state?.SourceId ?? "";
 
-    public string BlockCurrentLabel()
+    /// <summary>设置页「屏蔽当前播放器」按钮：返回 (播放器 id, 按钮文字)，无会话时 id 为空。
+    /// 调用方要把 id 跟文字一起记下、点击时原样交给 <see cref="ToggleBlock"/>：
+    /// 点击时再取「当前播放器」的话，文字一过期（窗口开着时换了播放器，或刚屏蔽的那个
+    /// 已被换下去）就会屏蔽掉另一个播放器，跟按钮上写的对不上。</summary>
+    public (string SourceId, string Label) CurrentBlockToggle()
     {
         var sid = CurrentSourceId();
-        if (sid.Length == 0) return "屏蔽当前播放器（无会话）";
-        var blocked = Cfg.PlayerBlocklist.Any(b => sid.ToLowerInvariant().Contains(b));
-        return blocked ? $"取消屏蔽『{sid}』" : $"屏蔽『{sid}』";
+        if (sid.Length == 0) return ("", "屏蔽当前播放器（无会话）");
+        return (sid, IsBlocked(sid) ? $"取消屏蔽『{sid}』" : $"屏蔽『{sid}』");
     }
 
-    public void ToggleBlockCurrent()
+    /// <summary>与 SmtcListener.PickSession 同一套规则：名单里的关键词是来源 id 的子串（均按小写比）即算屏蔽。</summary>
+    private bool IsBlocked(string sid)
     {
-        var sid = CurrentSourceId();
-        if (sid.Length == 0) return;
-        var existing = Cfg.PlayerBlocklist.FirstOrDefault(b => sid.ToLowerInvariant().Contains(b));
-        if (existing != null) Cfg.PlayerBlocklist.Remove(existing);
-        else Cfg.PlayerBlocklist.Add(sid.ToLowerInvariant());
+        var s = sid.ToLowerInvariant();
+        return Cfg.PlayerBlocklist.Any(b => s.Contains(b.ToLowerInvariant()));
+    }
+
+    /// <summary>切换某个播放器的屏蔽状态。解除时去掉所有命中它的关键词——
+    /// 只去第一条的话，名单里恰好还有另一条也命中它时，点了等于没解除。</summary>
+    public void ToggleBlock(string sourceId)
+    {
+        if (sourceId.Length == 0) return;
+        var s = sourceId.ToLowerInvariant();
+        SetBlocklist(IsBlocked(sourceId)
+            ? Cfg.PlayerBlocklist.Where(b => !s.Contains(b.ToLowerInvariant())).ToList()
+            : Cfg.PlayerBlocklist.Append(s).ToList());
+    }
+
+    /// <summary>设置页「已屏蔽的播放器」逐条解除。被屏蔽的播放器永远当不上「当前播放器」，
+    /// 上面那个按钮对它无能为力（浏览器默认就在名单里），只能从这里放出来。</summary>
+    public void Unblock(string keyword) =>
+        SetBlocklist(Cfg.PlayerBlocklist.Where(b => b != keyword).ToList());
+
+    /// <summary>整份换新而不是原地增删：SMTC 监听线程每轮都要枚举这份名单，
+    /// 启动时检查更新写时间戳也会在后台线程序列化它，原地改会撞上「集合已修改」。
+    /// 监听侧每轮现取名单，下一轮轮询（≤0.5s）即生效，不必等「应用」。</summary>
+    private void SetBlocklist(List<string> list)
+    {
+        Cfg.PlayerBlocklist = list;
         SaveCfg();
     }
 

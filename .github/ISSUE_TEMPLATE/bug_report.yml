@@ -10,7 +10,8 @@ body:
         1. 播放器的「系统媒体控件（SMTC）」开关有没有打开。播放时按一下音量键，
            系统弹出的媒体浮层里能看到歌名 / 歌手 / 封面才算通 —— 看不到的话
            任务栏这边什么都收不到，详见 [README](../#前提播放器必须打开系统媒体控件smtc上报)。
-        2. exe 同目录（或 `%AppData%\TaskbarLyrics`）下的 `error.log` 有没有内容。
+        2. `error.log` 有没有内容。它优先写在 exe 同目录；exe 所在目录写不进去时
+           （比如放在 `C:\Program Files` 下）会改写到 `%AppData%\TaskbarLyrics\error.log`，两处都看一眼。
 
   - type: input
     id: version
