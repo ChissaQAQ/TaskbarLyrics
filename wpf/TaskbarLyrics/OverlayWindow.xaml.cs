@@ -5,7 +5,7 @@
 // - floating：独立置顶悬浮窗，可拖到屏幕任意位置
 // 左键拖动、右键弹出菜单、锁定时整窗鼠标穿透。
 // 悬停时播放控制按钮淡入浮现（离开时淡出），切行有滑动淡入动画，
-// 逐字扫过由 Storyboard 驱动 KaraokeText.PositionMs（GPU 合成，不逐帧重绘）。
+// 逐字扫过由 Storyboard 驱动 KaraokeText.PositionMs（渲染线程合成，不逐帧重绘）。
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -19,7 +19,7 @@ namespace TaskbarLyrics;
 
 public partial class OverlayWindow : Window
 {
-    private static readonly TimeSpan AnimLine = TimeSpan.FromMilliseconds(320); // 切行动画
+    private static readonly TimeSpan AnimLine = TimeSpan.FromMilliseconds(360); // 切行动画（位移与淡变同长，见 EaseMove）
     private static readonly TimeSpan AnimFade = TimeSpan.FromMilliseconds(150); // 按钮/遮罩浮现淡出
     private const double ButtonsWidth = 96;                                     // 悬停按钮区占位宽度
     /// <summary>逐字进度允许的漂移（ms），超出才 Seek 校准（见 SyncProgress）。
@@ -103,6 +103,12 @@ public partial class OverlayWindow : Window
         SourceInitialized += (_, _) =>
         {
             _hwnd = new WindowInteropHelper(this).Handle;
+            // 本窗口改走软件渲染。分层（透明）窗口走 GPU 时，每帧都得把画面从显存读回
+            // 系统内存再交给 UpdateLayeredWindow——窗口就这么一小条，回读和驱动往返比光栅化
+            // 本身还贵。实测逐字扫光的常态下渲染线程 CPU 从 17~20% 降到 8~11%，
+            // 改窗口宽度那一下的卡顿也短了一截，帧率不变。只影响这个窗口，设置窗口照旧走 GPU
+            if (HwndSource.FromHwnd(_hwnd)?.CompositionTarget is { } target)
+                target.RenderMode = RenderMode.SoftwareOnly;
             SetLocked(Cfg.Locked);
             ApplyTextRendering();
             ApplyThemeChrome();
@@ -229,10 +235,12 @@ public partial class OverlayWindow : Window
 
         // 本次切行的动画（没走动画分支时为 null）：窗口收窄要等它跑完，见函数末尾 Dock 处
         Storyboard? lineSb = null;
+        // 得等布局落定才能量的那部分动画（传送带切行的共享句形变），在 Dock 之后、启动之前补上
+        Action? addAfterLayout = null;
 
         if (animate && oldLine != null)
         {
-            // 上一次切行的 320ms 动画还没跑完就又切了行（密集说唱段落）：
+            // 上一次切行的动画还没跑完就又切了行（密集说唱段落）：
             // 把除这次要参与动画的旧行之外的残留行直接摘掉，否则 LinesHost 里会
             // 同时叠着三四层半透明的行，糊成一团。各自动画的 Completed 照旧执行
             // （Remove 已移除的元素是空操作），逐字动画的释放不受影响
@@ -254,7 +262,7 @@ public partial class OverlayWindow : Window
                            && ((FrameworkElement)osp.Children[0]).ActualHeight > 4;
             if (conveyor)
             {
-                // 传送带切行（第二行是下一句）：旧块整体上移一个行距（不淡出），
+                // 传送带切行（第二行是下一句）：旧块整体上移一个行距，
                 // 新块同速从下方进入——旧下行与新上行是同一句，看起来就是它补位上去。
                 // 行距必须取第二行的实际偏移（含两行间距）：只算第一行高度会差 3px，
                 // 旧下行和新上行永远错开，动画全程重影、结尾还跳一下（「残留」的根因）
@@ -263,27 +271,35 @@ public partial class OverlayWindow : Window
                     .TransformToAncestor(osp2).Transform(new Point(0, 0)).Y;
                 if (pitch < 4) // 兜底：测量失败退回第一行高度
                     pitch = ((FrameworkElement)osp2.Children[0]).ActualHeight;
-                oldLine.RenderTransform = new TranslateTransform();
-                visual.RenderTransform = new TranslateTransform(0, pitch);
+                // 密集切行时旧块还停在半路：同普通分支，从它当前的位置接着走，
+                // 新块的起点跟着让同样的量——两块始终差一个行距，旧下行与新上行全程重合
+                var oldY = oldLine.RenderTransform is TranslateTransform ot ? ot.Y : 0;
+                oldLine.RenderTransform = new TranslateTransform(0, oldY);
+                visual.RenderTransform = new TranslateTransform(0, oldY + pitch);
                 LinesHost.Children.Add(visual);
 
                 var sb = new Storyboard();
-                AddAnim(sb, oldLine, new PropertyPath("(UIElement.RenderTransform).(TranslateTransform.Y)"), 0, -pitch, easing: EaseMove);
-                AddAnim(sb, visual, new PropertyPath("(UIElement.RenderTransform).(TranslateTransform.Y)"), pitch, 0, easing: EaseMove);
-                // 共享句 morph：旧「下一句」是小号灰字、新「当前句」是大号白字，
-                // 刚性平移会让两种渲染全程叠影（「残留」的根因）——
-                // 旧下行在滑行中淡出、新上行淡入，小灰字滑上去的同时变成大白字
+                AddAnim(sb, oldLine, TranslateYPath, oldY, -pitch);
+                AddAnim(sb, visual, TranslateYPath, oldY + pitch, 0);
+                // 旧上行从顶边走出去：同普通分支贴边淡出，不让裁剪边缘一刀切掉
+                var oldTop = (FrameworkElement)osp2.Children[0];
+                AddAnim(sb, oldTop, OpacityPath, oldTop.Opacity, 0, FadeLeaving);
                 var oldBottom = (FrameworkElement)osp2.Children[1];
-                AddAnim(sb, oldBottom, new PropertyPath("Opacity"), oldBottom.Opacity, 0);
-                if (visual is Panel nsp && nsp.Children.Count > 1)
+                if (visual is Panel nsp && nsp.Children.Count > 1
+                    && oldBottom is ScrollingTextHost from && nsp.Children[0] is ScrollingTextHost to)
                 {
-                    var top = (FrameworkElement)nsp.Children[0];
-                    top.Opacity = 0;
-                    AddAnim(sb, top, new PropertyPath("Opacity"), 0, 1);
-                    // 新的“下一句”淡入
+                    // 共享句（旧下行与新上行是同一句）：小号灰字边往上走边长成大号白字，
+                    // 而不是大字在首行原地浮现。要量两行文字的实际排版，放到布局落定之后（见 AddMorph）
+                    to.Opacity = 0;
+                    addAfterLayout = () => AddMorph(sb, from, to);
+                    // 新的“下一句”从底边进来，同样贴边淡入
                     var bottom = (FrameworkElement)nsp.Children[1];
                     bottom.Opacity = 0;
-                    AddAnim(sb, bottom, new PropertyPath("Opacity"), 0, 1);
+                    AddAnim(sb, bottom, OpacityPath, 0, 1, FadeEntering);
+                }
+                else
+                {
+                    AddAnim(sb, oldBottom, OpacityPath, oldBottom.Opacity, 0, FadeLeaving);
                 }
                 var oldRef = oldLine;
                 sb.Completed += (_, _) =>
@@ -291,31 +307,39 @@ public partial class OverlayWindow : Window
                     LinesHost.Children.Remove(oldRef);
                     ReleaseKaraoke(oldSb);
                 };
-                sb.Begin(this);
                 lineSb = sb;
             }
             else
             {
-                // 整行滚动切行：旧行上移淡出，新行从下方滑入（对称 S 型缓动，幅度见 MoveRatio）
-                var lineH = oldLine.ActualHeight > 4 ? oldLine.ActualHeight : 24;
-                var dist = lineH * MoveRatio;
-                oldLine.RenderTransform = new TranslateTransform();
-                visual.RenderTransform = new TranslateTransform(0, dist);
-                visual.Opacity = 0;
+                // 整行传送带切行：旧行整块往上走出去，新行贴在它正下方同速跟上来。
+                // 位移取两块高度的平均再加一道块间距——两行都垂直居中，这正好是
+                // 「新行顶边始终离旧行底边 BlockGap」的距离，全程互不重叠（见 EaseMove）。
+                // 新行得先挂进树再量：字号、排版模式、布局取整都是从窗口继承的
                 LinesHost.Children.Add(visual);
+                visual.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+                var oldH = oldLine.ActualHeight > 4 ? oldLine.ActualHeight : 24;
+                var newH = visual.DesiredSize.Height > 4 ? visual.DesiredSize.Height : oldH;
+                var dist = (oldH + newH) / 2 + BlockGap;
+                // 上一次切行没跑完就又切（密集段落）时，旧行还停在半路：从它当前的位置接着走，
+                // 按 0 重来的话它会先瞬移回原位再出发。新行的起点跟着往下让同样的量，
+                // 两块走的路程才相等、间距才全程不变
+                var oldY = oldLine.RenderTransform is TranslateTransform ot ? ot.Y : 0;
+                oldLine.RenderTransform = new TranslateTransform(0, oldY);
+                visual.RenderTransform = new TranslateTransform(0, oldY + dist);
+                visual.Opacity = 0;
 
+                // 淡变和位移同一时长、同一个进度，只是把变化挪到贴边的那半程（见 EdgeFade）
                 var sb = new Storyboard();
-                AddAnim(sb, oldLine, new PropertyPath("Opacity"), oldLine.Opacity, 0, AnimExit);
-                AddAnim(sb, oldLine, new PropertyPath("(UIElement.RenderTransform).(TranslateTransform.Y)"), 0, -dist, easing: EaseMove);
-                AddAnim(sb, visual, new PropertyPath("Opacity"), 0, 1);
-                AddAnim(sb, visual, new PropertyPath("(UIElement.RenderTransform).(TranslateTransform.Y)"), dist, 0, easing: EaseMove);
+                AddAnim(sb, oldLine, OpacityPath, oldLine.Opacity, 0, FadeLeaving);
+                AddAnim(sb, oldLine, TranslateYPath, oldY, -dist);
+                AddAnim(sb, visual, OpacityPath, 0, 1, FadeEntering);
+                AddAnim(sb, visual, TranslateYPath, oldY + dist, 0);
                 var oldRef = oldLine;
                 sb.Completed += (_, _) =>
                 {
                     LinesHost.Children.Remove(oldRef);
                     ReleaseKaraoke(oldSb); // 旧行的逐字动画随淡出结束释放
                 };
-                sb.Begin(this);
                 lineSb = sb;
             }
         }
@@ -339,9 +363,9 @@ public partial class OverlayWindow : Window
         // 动画期间不收窄窗口。
         //
         // 分层窗口每次 SetWindowPos 都要重建整张 layered surface，还要让 explorer
-        // 重合成任务栏那一条，而 Dock 就在 sb.Begin 之后调用——这一下精确落在动画第 0 帧。
+        // 重合成任务栏那一条，实测一次 30~100ms，UI 线程全程被按住。
         // 变宽必须立刻（否则更长的新行会被裁掉尾巴），收窄则完全可以等：
-        // 那 320ms 里右侧多留几像素透明空白，没人看得出来。
+        // 切行动画那一小段里右侧多留几像素透明空白，没人看得出来。
         // QuantizeWidth 的 8dip 台阶已经吃掉了相邻两行长度相近的情形，
         // 这里再削掉「新行明显更短」那一半。
         if (lineSb != null && targetWidth < _lyricsWidthDip)
@@ -352,14 +376,73 @@ public partial class OverlayWindow : Window
             {
                 if (!ReferenceEquals(_currentLine, forLine)) return;
                 _lyricsWidthDip = narrowTo;
-                Dock();
+                Dock(assertZOrder: false);
             };
         }
         else
         {
             _lyricsWidthDip = targetWidth;
         }
-        Dock();
+        // 切行这一路不重新断言 z-order：那是一次跨进程的 SetWindowPos（实测 1~8ms），
+        // 正好压在动画第 0 帧上；任务栏子窗口的层级由 1.5s 周期 Dock 和前台切换钩子兜着
+        Dock(assertZOrder: false);
+        // 动画放到 Dock 之后才启动：变宽的那次改尺寸会同步卡住几十毫秒，
+        // 先启动的话时钟在卡顿里照走，解冻后第一帧直接跳到半路；
+        // 放在后面，卡顿落在画面还静止的时候，动画从第 0 帧完整走起。
+        // 共享句形变要量新旧两行文字的实际位置，同样得等 Dock 把窗口宽改完
+        addAfterLayout?.Invoke();
+        lineSb?.Begin(this);
+    }
+
+    /// <summary>传送带切行的共享句形变：from 是旧块的「下一句」（小号灰字），
+    /// to 是新块的「当前句」（大号白字），两者是同一句歌词。
+    ///
+    /// to 起步时被缩放平移到恰好盖住 from 的文字包围盒，随动画长回原样；
+    /// from 反过来从原样长到 to 的终点形状。两边的缩放、平移都按同一进度线性插值，
+    /// 两个包围盒全程严丝合缝地重合，看起来就是一行字边往上走边变大。
+    /// 两块整体又一起平移（始终差一个行距），所以在起点量出的相对关系整段动画都成立。
+    ///
+    /// 位置取实际排版结果，不按对齐方式推算：大字溢出切了左对齐+滚动、小字没溢出还居中，
+    /// 或者大字已经滚到一半（从中途接上播放），推算都会错位，量出来的包围盒天然覆盖这些情形。</summary>
+    private void AddMorph(Storyboard sb, ScrollingTextHost from, ScrollingTextHost to)
+    {
+        // 新块刚挂进树、窗口可能刚改过宽：先把布局落定再量。
+        // 这一遍本来就要在下一帧做，挪到这里只是提前，不是额外开销
+        UpdateLayout();
+        var s = from.TextBounds(LinesHost);
+        var b = to.TextBounds(LinesHost);
+        if (s.Width < 1 || s.Height < 1 || b.Width < 1 || b.Height < 1)
+        {
+            // 量不到（窗口隐藏、布局没出来）：退回各自淡入淡出，照样能切
+            AddAnim(sb, from, OpacityPath, from.Opacity, 0, FadeLeaving);
+            AddAnim(sb, to, OpacityPath, 0, 1, FadeEntering);
+            return;
+        }
+        var kx = s.Width / b.Width;
+        var ky = s.Height / b.Height;
+        var dx = s.Left - b.Left;
+        var dy = s.Top - b.Top;
+
+        var toBlock = to.ApplyMorph(kx, ky, dx, dy);
+        AddAnim(sb, toBlock, MorphScaleXPath, kx, 1);
+        AddAnim(sb, toBlock, MorphScaleYPath, ky, 1);
+        AddAnim(sb, toBlock, MorphXPath, dx, 0);
+        AddAnim(sb, toBlock, MorphYPath, dy, 0);
+        var fromBlock = from.ApplyMorph(1, 1, 0, 0);
+        AddAnim(sb, fromBlock, MorphScaleXPath, 1, 1 / kx);
+        AddAnim(sb, fromBlock, MorphScaleYPath, 1, 1 / ky);
+        AddAnim(sb, fromBlock, MorphXPath, 0, -dx);
+        AddAnim(sb, fromBlock, MorphYPath, 0, -dy);
+
+        // 换色（灰→白）的交叉淡变挤在起步那一小段做完。两层是不同字号排出来再缩放的，
+        // 笔画不可能完全重合，两层都半透明叠着的时间越长，越像一行字带着重影在走。
+        // 新字在上层（后挂进树）先淡入把旧字盖住，这期间旧字保持不透明，
+        // 总覆盖率不掉、不会闪暗；盖严了再把旧字撤掉。这时才走了约四分之一的路、
+        // 尺寸几乎还是小字，之后整段上移和放大都只有新字一层
+        AddAnim(sb, to, OpacityPath, 0, 1, MorphIn);
+        AddAnim(sb, from, OpacityPath, from.Opacity, 0, MorphOut);
+        // 旧行随动画结束整块移除，不用管；新行停在恒等变换，撤掉让文字回到不带变换的渲染
+        sb.Completed += (_, _) => to.ClearMorph();
     }
 
     /// <summary>把内容宽度向上取到 8dip 的台阶。
@@ -479,42 +562,72 @@ public partial class OverlayWindow : Window
     /// <summary>淡变/展开统一用三次缓出：线性淡变在起止处显得生硬。</summary>
     private static readonly IEasingFunction EaseOut = new CubicEase { EasingMode = EasingMode.EaseOut };
 
-    /// <summary>位移专用缓动：正弦缓出。
+    /// <summary>切行动画的缓动：正弦缓入缓出。
     ///
-    /// 位移原先和淡变共用三次缓出，而它的速度曲线是 v(t)=3(1-t)²——初速度足足是
-    /// 平均速度的 3 倍。带译文时行块高约 44px、320ms 走完约 19 帧，平均每帧 2.2px，
-    /// 可开头几帧每帧要跳 6~7px，在 12pt 的小字上就是半个字高；随后飞快衰减
-    /// （t=0.7 只剩初速度的 9%），后 1/3 几乎不动。观感是「猛地一冲再拖着尾巴黏过去」。
-    /// 实测切行全程 96% 的帧都是满帧、掉帧率约 1%（换掉分层窗口走 GPU 路径也还是 1%），
-    /// 所以「不流畅」压根不是掉帧，是这条曲线本身：开头太急、结尾太黏。
+    /// 之前是位移只走 0.6 个行高、正弦缓出，旧行 120ms 就淡没。幅度不满一行，
+    /// 新旧两行中段必然叠在一起，只能让旧行抢先退场——可 120ms 的三次缓出第一帧就掉
+    /// 36% 不透明度、第三帧只剩两成，这时它才挪了不到 4px：旧行不是「滑上去」而是「闪没」，
+    /// 两行加起来的亮度在 50~80ms 还会塌到 0.6 上下，整条一暗一亮。
     ///
-    /// 但也不能换成对称 S 型（三次缓入缓出）：那个初速度为零、前段极慢，
-    /// 旧行在自己 120ms 的可见期（AnimExit）内只走 21% 约 4px，等于在原地淡没，
-    /// 新行却照旧从下方进来——两件事对不上，看着就是不连贯。
-    ///
-    /// 正弦缓出两头都占：初速度 π/2≈1.57 倍平均（三次缓出的一半），开头每帧约 2.2px；
-    /// t=0.375 时已走过 55.6%，旧行在淡出前明显是「滑上去离开」。
-    /// 于是新旧两行能共用同一条曲线、同一幅度——看起来是一条传送带在动，而不是
-    /// 两个各自为政的东西。淡变仍留在缓出上：透明度要的就是尽快出现，
-    /// 且人眼对亮度跳变本来不敏感。</summary>
-    private static readonly IEasingFunction EaseMove = new SineEase { EasingMode = EasingMode.EaseOut };
+    /// 现在是首尾相接的整块传送带（见 SetLine）：两行永不重叠，旧行可以陪新行走完全程，
+    /// 淡变跟着位移的进度走（见 EdgeFade）。「旧行必须抢在前面退场」这条约束没了，
+    /// 缓入缓出当初被否掉的理由也就不在了，而它两头速度为零正好对症：
+    /// 头一两帧要排版、光栅化新行，最后一帧要摘掉旧行，是整段里最容易丢帧的时刻，
+    /// 这时速度接近零，丢一帧也看不出位移跳变。峰值速度是平均的 π/2 倍，
+    /// 倍数和原来缓出的初速度一样，只是从开头挪到了中段。</summary>
+    private static readonly IEasingFunction EaseMove = new SineEase { EasingMode = EasingMode.EaseInOut };
 
-    /// <summary>切行位移占行块高度的比例（新旧两行共用，构成同一条传送带）。
-    ///
-    /// 原先滑满一整个行高：幅度越大每帧跨度越大，偶发丢一帧时的空间跳变也越显眼。
-    /// 压到 0.6 后每帧跨度小四成，而「上一句往上走、下一句补上来」的方向感照旧清楚。
-    /// 传送带模式（第二行是下一句）不用这个比例：那是同一句从下行升到上行，
-    /// 位移必须精确等于行距，差一点点旧下行和新上行就对不齐、全程重影。</summary>
-    private const double MoveRatio = 0.6;
+    /// <summary>整行传送带切行时新旧两块之间的间距（DIP）。
+    /// 比原文与译文之间的 3px 行距略宽：中途两块同时在画面里，靠这点间隔认出哪两行是一句。</summary>
+    private const double BlockGap = 6;
 
-    /// <summary>旧行淡出时长，明显短于位移时长（AnimLine）。
+    /// <summary>整行传送带切行的淡变曲线：进度 q 照 EaseMove 走，离场的行按 1-q² 变暗，
+    /// 入场的行按 1-(1-q)² 变亮——走到半程各还有 75%，淡变集中在贴着窗口边缘的那半程。
     ///
-    /// 两者等长时，动画中段（t≈160ms）旧行与新行各约半透明、垂直错开半个行高——
-    /// 任务栏只有一行的高度，屏幕上就是两行灰虚影上下交错叠在一起，看起来「糊」。
-    /// 这不是掉帧（实测切行全程 16.7ms/帧），而是交叉淡变本身的产物。
-    /// 让旧行在前 1/3 就退干净：中段只剩新行在淡入，且此时它已到八成不透明度，
-    /// 字是实的。位移仍走完 AnimLine，滑出的节奏不变。</summary>
-    private static readonly Duration AnimExit = new(TimeSpan.FromMilliseconds(120));
+    /// 不直接拿 q 当透明度（半程各 50%）：带译文的一块差不多和任务栏一样高，
+    /// 走到半程时新旧两块各有一半已经在窗口外被裁掉，再各打五折，
+    /// 画面上只剩平时一半多一点的字，每切一行整条都暗一下。
+    /// 两块不重叠，没有「叠起来过亮」的问题，亮度留高一点只会让滚动看得更清楚。
+    /// 两头的变化率仍是零（q 的速度在两头为零），起止不会突兀。</summary>
+    private sealed class EdgeFade(bool entering) : IEasingFunction
+    {
+        public double Ease(double t)
+        {
+            var q = EaseMove.Ease(t);
+            return entering ? 1 - (1 - q) * (1 - q) : q * q;
+        }
+    }
+
+    private static readonly IEasingFunction FadeEntering = new EdgeFade(true);
+    private static readonly IEasingFunction FadeLeaving = new EdgeFade(false);
+
+    /// <summary>只在动画时长的 [from, to] 这一段里走完的进度（smoothstep，两头变化率为零），
+    /// 段外保持不动。按时间而不是按位移进度切：共享句换色要赶在起步、移动还慢的时候做完。</summary>
+    private sealed class TimeWindow(double from, double to) : IEasingFunction
+    {
+        public double Ease(double t)
+        {
+            var x = Math.Clamp((t - from) / (to - from), 0, 1);
+            return x * x * (3 - 2 * x);
+        }
+    }
+
+    // 共享句的新字在前 35% 的时间里淡入；旧字等新字过半（20% 处）才开始撤，45% 时撤完
+    // ——撤的过程中两层合起来的覆盖率始终在 97% 以上
+    private static readonly IEasingFunction MorphIn = new TimeWindow(0, 0.35);
+    private static readonly IEasingFunction MorphOut = new TimeWindow(0.2, 0.45);
+
+    private static readonly PropertyPath OpacityPath = new("Opacity");
+    private static readonly PropertyPath TranslateYPath = new("(UIElement.RenderTransform).(TranslateTransform.Y)");
+    // 共享句形变挂在文本本体上：变换组里 [0] 是缩放、[1] 是平移（见 ScrollingTextHost.ApplyMorph）
+    private static readonly PropertyPath MorphScaleXPath =
+        new("(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleX)");
+    private static readonly PropertyPath MorphScaleYPath =
+        new("(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleY)");
+    private static readonly PropertyPath MorphXPath =
+        new("(UIElement.RenderTransform).(TransformGroup.Children)[1].(TranslateTransform.X)");
+    private static readonly PropertyPath MorphYPath =
+        new("(UIElement.RenderTransform).(TransformGroup.Children)[1].(TranslateTransform.Y)");
 
     /// <summary>透明度淡变。必须显式给 From（取当前有效值）：
     /// DoubleAnimation 只给 To 时起点取属性「基值」而非当前动画值——
@@ -524,13 +637,12 @@ public partial class OverlayWindow : Window
         => el.BeginAnimation(OpacityProperty,
             new DoubleAnimation(el.Opacity, target, AnimFade) { EasingFunction = EaseOut });
 
-    /// <summary>加一条切行动画。From 同样必须显式给，理由见 FadeTo。
-    /// duration 省略时用切行时长（旧行淡出要更短，见 AnimExit）；
-    /// easing 省略时用缓出（位移要传 EaseMove，理由见那里）。</summary>
+    /// <summary>加一条切行动画（时长 AnimLine，缓动省略时用 EaseMove，理由见那里）。
+    /// From 同样必须显式给，理由见 FadeTo。</summary>
     private static void AddAnim(Storyboard sb, FrameworkElement target, PropertyPath path,
-        double from, double to, Duration? duration = null, IEasingFunction? easing = null)
+        double from, double to, IEasingFunction? easing = null)
     {
-        var anim = new DoubleAnimation(from, to, duration ?? AnimLine) { EasingFunction = easing ?? EaseOut };
+        var anim = new DoubleAnimation(from, to, AnimLine) { EasingFunction = easing ?? EaseMove };
         Storyboard.SetTarget(anim, target);
         Storyboard.SetTargetProperty(anim, path);
         sb.Children.Add(anim);
@@ -541,7 +653,7 @@ public partial class OverlayWindow : Window
     /// 这不是省几次乘法的微优化：ScrollingTextHost 的平滑跟随靠订阅
     /// CompositionTarget.Rendering，一订阅就把 WPF 的渲染节拍从「渲染线程自己插值」
     /// 拉成「每帧唤醒 UI 线程」。切行时旧行的跟随往往还没到位（长行滚动中被切走），
-    /// 于是整段 320ms 动画里 UI 线程被每帧叫醒一次，而这个窗口是分层（透明）窗口、
+    /// 于是整段切行动画里 UI 线程被每帧叫醒一次，而这个窗口是分层（透明）窗口、
     /// 全程 CPU 软件光栅化——多出来的那点工作正好把帧时间顶过 16.7ms。
     /// 旧行已在淡出，滚到哪都没人看，直接停订阅。</summary>
     private static void FreezeScrolling(DependencyObject root)
@@ -742,8 +854,9 @@ public partial class OverlayWindow : Window
     // 到这一步宁可把封面收掉，把地方全让给文字
     private const double MinContentDip = 160;
 
-    /// <summary>按当前模式与配置摆放窗口（周期调用以跟随任务栏变化/重建）。</summary>
-    public void Dock()
+    /// <summary>按当前模式与配置摆放窗口（周期调用以跟随任务栏变化/重建）。
+    /// assertZOrder=false 时位置尺寸没变就什么都不做，不再顺手断言层级（切行路径用，见 SetLine）。</summary>
+    public void Dock(bool assertZOrder = true)
     {
         if (_hwnd == IntPtr.Zero) return;
         var heightDip = CurrentHeightDip();
@@ -828,7 +941,7 @@ public partial class OverlayWindow : Window
         var displayedW = _showingInfo ? _infoWidthDip : _lyricsWidthDip;
         var textOffset = IsLeftAlign ? 0 : Math.Max(0, (contentW - displayedW) / 2);
         HoverMask.Width = Math.Max(24, coverZone + buttonsZone + textOffset + displayedW - 4);
-        ApplyPosition();
+        ApplyPosition(assertZOrder);
     }
 
     /// <summary>窗口当前在任务栏 client 坐标系里的 x（自动避让就近选档用）。</summary>
@@ -840,7 +953,7 @@ public partial class OverlayWindow : Window
     }
 
     /// <summary>按 _displayWidthDip 摆放窗口位置（任务栏挂靠或浮动）。</summary>
-    private void ApplyPosition()
+    private void ApplyPosition(bool assertZOrder)
     {
         var heightDip = _lastHeightDip;
         var widthPx = (int)Math.Round(_displayWidthDip * DpiScaleX());
@@ -917,7 +1030,8 @@ public partial class OverlayWindow : Window
             // 缓存值要跟窗口的真实矩形对一遍：否则万一有别的东西挪动了我们，
             // 缓存会把错位状态永久锁死（缓存只是省调用，不是位置的唯一真相）。
             // 不带 SWP_NOZORDER：断言为任务栏子窗口最顶层，
-            // 任务栏内部重排（如悬停图标弹出预览）后仍保持可见
+            // 任务栏内部重排（如悬停图标弹出预览）后仍保持可见。
+            // 切行路径传 assertZOrder=false 连这一下也省掉（见 SetLine 末尾）
             var prevTray = _lastTbTray;
             NativeMethods.GetWindowRect(_hwnd, out var curRc);
             NativeMethods.GetWindowRect(tray, out var trayRc);
@@ -925,8 +1039,9 @@ public partial class OverlayWindow : Window
                 && curRc.Left - trayRc.Left == x
                 && curRc.Width == widthPx && curRc.Height == heightPx)
             {
-                NativeMethods.SetWindowPos(_hwnd, IntPtr.Zero, 0, 0, 0, 0,
-                    NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE);
+                if (assertZOrder)
+                    NativeMethods.SetWindowPos(_hwnd, IntPtr.Zero, 0, 0, 0, 0,
+                        NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE);
                 return;
             }
             (_lastTbTray, _lastTbX, _lastTbW, _lastTbH) = (tray, x, widthPx, heightPx);

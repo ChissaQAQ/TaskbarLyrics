@@ -290,12 +290,17 @@ internal static class NativeMethods
     public static void MakePopup(IntPtr hwnd, bool topmost)
     {
         var reparented = false;
-        if (GetParent(hwnd) != IntPtr.Zero)
+        long style = GetWindowLongPtr(hwnd, GWL_STYLE);
+        // 还挂没挂在任务栏下面看 WS_CHILD，不能看 GetParent：对弹出窗口它返回的是「所有者」，
+        // 而 WPF 给 ShowInTaskbar=False 的窗口配了个隐藏的所有者——永远非空。照它判断，
+        // 浮动模式每次 Dock 都会 SetParent 一遍，而 SetParent 对可见窗口是「先藏、换父、
+        // 再显示」的一整套，实测一次 30~45ms、UI 线程全程被按住：每切一行来一次
+        // （正好压在切行动画开头），1.5s 的周期重摆再来一次
+        if ((style & WS_CHILD) != 0)
         {
             SetParent(hwnd, IntPtr.Zero);
             reparented = true; // 脱离任务栏回到顶层，DPI 改按窗口当前所在显示器算，同样要补一次
         }
-        long style = GetWindowLongPtr(hwnd, GWL_STYLE);
         var newStyle = (style & ~WS_CHILD) | WS_POPUP;
         if (newStyle != style)
         {

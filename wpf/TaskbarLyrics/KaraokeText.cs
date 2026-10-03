@@ -336,12 +336,43 @@ public abstract class ScrollingTextHost : NaturalMeasureGrid
     /// 切行时只暂停逐字 Storyboard 是不够的——平滑跟随是本类自己的
     /// CompositionTarget.Rendering 订阅，与那个 Storyboard 无关，会继续每帧
     /// 唤醒 UI 线程做低通滤波、改 TranslateTransform.X。旧行正在淡出，没人再看
-    /// 它滚到哪，这些帧全是白烧的——而它们正落在切行动画那 320ms 里，
+    /// 它滚到哪，这些帧全是白烧的——而它们正落在切行动画那几百毫秒里，
     /// 与新行的滚动、软件光栅化挤同一个 16.7ms 预算。
     /// 停订阅而不复位位移：位置定格在当前处，视觉上没有跳变。
     /// 不碰走马灯——它与平滑跟随互斥，且 BeginAnimation(null) 会让 X 掉回基值 0，
     /// 淡出中的行会横向跳一下。走马灯是属性动画，由渲染线程独立插值，不占 UI 线程。</summary>
     public void FreezeScroll() => StopFollowing();
+
+    /// <summary>文本本体（TextBlock）在 ancestor 坐标系里的包围盒；还没排版、不在其下时返回 Rect.Empty。
+    /// 供传送带切行的共享句形变量起止位置（见 OverlayWindow.AddMorph），已含本元素的滚动位移。</summary>
+    public Rect TextBounds(Visual ancestor)
+    {
+        foreach (UIElement c in Children)
+            if (c.Visibility == Visibility.Visible && c.RenderSize.Width > 0 && c.IsDescendantOf(ancestor))
+                return c.TransformToAncestor(ancestor).TransformBounds(new Rect(c.RenderSize));
+        return Rect.Empty;
+    }
+
+    /// <summary>给文本本体挂一个形变：先按 (scaleX, scaleY) 缩放、再平移 (x, y)，坐标系是 TextBlock 自己的。
+    /// 各文本层（逐字的暗/亮两层）共享同一个变换，返回其中一个作动画目标，动它即全部跟着动。
+    ///
+    /// 挂在内部 TextBlock 上而不是本元素：本元素的 RenderTransform 归横向滚动所有，
+    /// RefreshOverflow 会把它整个清掉、走马灯要接管它的 X。亮层的高亮 Clip 在局部坐标里，
+    /// 随变换一起缩放，不用另算。</summary>
+    public FrameworkElement ApplyMorph(double scaleX, double scaleY, double x, double y)
+    {
+        var morph = new TransformGroup();
+        morph.Children.Add(new ScaleTransform(scaleX, scaleY));
+        morph.Children.Add(new TranslateTransform(x, y));
+        foreach (UIElement c in Children) c.RenderTransform = morph;
+        return (FrameworkElement)Children[Children.Count - 1];
+    }
+
+    /// <summary>撤掉形变：动画停在恒等变换时视觉上没有差别，但留着它文字就一直走带变换的渲染路径。</summary>
+    public void ClearMorph()
+    {
+        foreach (UIElement c in Children) c.RenderTransform = null;
+    }
 
     /// <summary>本元素所在视觉树的 DPI 缩放（未入树时退回系统主 DPI）。</summary>
     protected double DpiScale()
