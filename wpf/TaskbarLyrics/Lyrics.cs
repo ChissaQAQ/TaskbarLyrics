@@ -316,28 +316,40 @@ public static partial class Lyrics
             .ThenByDescending(x => x.Artist)
             .ThenBy(x => x.DurDiff)
             .ToList();
-        var ordered = PreferArtistMatched(scored, x => x.Artist)
-            .Select(x => (x.Song, x.Ts))
+        // 歌曲搜索会漏掉个别曲目：实测ヘクとパスカル「fish in the pool」（同名专辑的主打曲）
+        // 换关键词、换搜索接口都搜不出来，只搜得到同专辑没歌词的「fish in the pool・花屋敷」，
+        // 于是判成「网易云没有这首歌」退到 QQ，拿回一份不带译文的英文歌词——而网易云上
+        // 这首明明有整份中文译文。专辑搜索倒能找到那张专辑，专辑详情里也列着这首歌。
+        // 所以只在搜不到「歌名满分且歌手对得上」的候选时，再按专辑找一遍：平时不多花请求
+        var extra = scored.Any(x => x.Ts >= TitleScoreMax && x.Artist)
+            ? new List<(long Id, double Dur, int Ts)>()
+            : await NeteaseAlbumTracksAsync(title, artist, durationS, referer);
+        var ordered = (extra ?? new List<(long Id, double Dur, int Ts)>())
+            .Concat(PreferArtistMatched(scored, x => x.Artist)
+                .Select(x => (Id: x.Song.GetProperty("id").GetInt64(), Dur: DurOf(x.Song), x.Ts)))
             .ToList();
         // 实测「告白氣球 / 周杰倫」：网易云没有周杰伦的版本，搜出来全是翻唱、伴奏和 beat。
         // 带时长的播放器（QQ 音乐、Spotify）一过时长闸，剩下的歌手全对不上，放开后挑中的是
         // 歌名完全相等的 228s 翻唱——时间轴跟原唱差十几秒，还当成完整结果写进缓存冻结 30 天，
-        // 而 QQ 那边明明就有原唱。所以得把「是放开挑的」带出去，由 FetchAsync 统筹各源
-        var artistMismatch = !scored.Any(x => x.Artist);
+        // 而 QQ 那边明明就有原唱。所以得把「是放开挑的」带出去，由 FetchAsync 统筹各源。
+        // 按专辑找回的曲目歌手是对得上的，有它就不算放开挑
+        var artistMismatch = extra is not { Count: > 0 } && !scored.Any(x => x.Artist);
         // 候选逐个尝试：同一首歌常有多个版本，
         // 有的版本没译文（主人反馈网易云明显有译文却显示不出来），优先带译文的版本
-        // 搜索正常应答、只是没有歌名/时长对得上的候选：同样是「确实没有」
-        if (ordered.Count == 0) return new SourceResult(new List<LyricLine>(), 0, NotFound: true);
+        // 搜索正常应答、只是没有歌名/时长对得上的候选：同样是「确实没有」。
+        // 按专辑找那一步失败了就不能这么说，按请求失败处理
+        if (ordered.Count == 0)
+            return extra == null ? null : new SourceResult(new List<LyricLine>(), 0, NotFound: true);
         SourceResult? firstResult = null;
         SourceResult? bestTrans = null;
         var bestTs = -1;
         var bestRatio = -1.0;
         // 有候选的歌词请求失败过：这时挑出来的未必是本该挑的那个（多半就是首选候选挂了、
-        // 落到了次选），结果要标成降级、不进缓存，否则一次抖动会把次优版本冻结 30 天
-        var anyFailed = false;
-        foreach (var (cand, ts) in ordered.Take(3))
+        // 落到了次选），结果要标成降级、不进缓存，否则一次抖动会把次优版本冻结 30 天。
+        // 按专辑找那一步失败同理：漏掉的可能正是本该挑的那首
+        var anyFailed = extra == null;
+        foreach (var (id, dur, ts) in ordered.Take(3))
         {
-            var id = cand.GetProperty("id").GetInt64();
             JsonDocument lyric;
             try
             {
@@ -383,7 +395,7 @@ public static partial class Lyrics
                     };
                 var merged = MergeTranslation(lines, trans, title, artist);
                 // 提前返回时后面的候选还没打，失败只可能出在前面，此刻的 anyFailed 就是全部
-                var picked = new SourceResult(merged, DurOf(cand), Degraded: anyFailed,
+                var picked = new SourceResult(merged, dur, Degraded: anyFailed,
                     ArtistMismatch: artistMismatch);
                 firstResult ??= picked;
                 if (secondLine == "off") return picked;
@@ -426,6 +438,61 @@ public static partial class Lyrics
             return anyFailed ? null : new SourceResult(new List<LyricLine>(), 0, NotFound: true);
         // 择优挑中的候选可能早于后面某个失败的候选，失败标记要按全程重算
         return best with { Degraded = anyFailed };
+    }
+
+    /// <summary>按专辑找回歌曲搜索漏掉的曲目（为什么要找见 FetchNeteaseAsync 的调用处）：
+    /// 专辑名与歌名对得上、专辑歌手也对得上的专辑最多看两张，取其中歌名满分、时长不离谱的曲目。
+    /// 只认专辑名对得上的：歌手名下的专辑可能有几十张，挨个翻请求太多，而漏搜的
+    /// 实测是同名专辑的主打曲。请求失败返回 null（与「确实没找到」的空列表区分开）。</summary>
+    private static async Task<List<(long Id, double Dur, int Ts)>?> NeteaseAlbumTracksAsync(
+        string title, string artist, double durationS, string referer)
+    {
+        static string NameOf(JsonElement e) =>
+            e.TryGetProperty("name", out var nv) && nv.ValueKind == JsonValueKind.String ? nv.GetString() ?? "" : "";
+        static IEnumerable<string> NamesOf(JsonElement e, string key) =>
+            e.TryGetProperty(key, out var arr) && arr.ValueKind == JsonValueKind.Array
+                ? arr.EnumerateArray().Select(NameOf) : Enumerable.Empty<string>();
+        var found = new List<(long Id, double Dur, int Ts)>();
+        try
+        {
+            using var search = await GetJsonAsync(
+                "https://music.163.com/api/search/get/web?" + Q(new()
+                {
+                    ["s"] = $"{title} {artist}", ["type"] = "10", ["limit"] = "10",
+                }), referer);
+            if (!NeteaseOk(search.RootElement)) return null;
+            if (!search.RootElement.TryGetProperty("result", out var result)
+                || !result.TryGetProperty("albums", out var albums)
+                || albums.ValueKind != JsonValueKind.Array)
+                return found;
+            var albumIds = albums.EnumerateArray()
+                .Where(a => TitleScore(NameOf(a), title) > 0 && ArtistMatches(NamesOf(a, "artists"), artist))
+                .Select(a => a.GetProperty("id").GetInt64())
+                .Take(2)
+                .ToList();
+            foreach (var albumId in albumIds)
+            {
+                using var album = await GetJsonAsync($"https://music.163.com/api/v1/album/{albumId}", referer);
+                if (!NeteaseOk(album.RootElement)) return null;
+                if (!album.RootElement.TryGetProperty("songs", out var songs)
+                    || songs.ValueKind != JsonValueKind.Array) continue;
+                // 专辑详情里的曲目是另一套字段名：歌手在 ar、时长在 dt（毫秒）
+                foreach (var s in songs.EnumerateArray())
+                {
+                    var ts = TitleScore(NameOf(s), title);
+                    if (ts < TitleScoreMax || !ArtistMatches(NamesOf(s, "ar"), artist)) continue;
+                    var dur = s.TryGetProperty("dt", out var dt) && dt.ValueKind == JsonValueKind.Number
+                        ? dt.GetDouble() / 1000 : 0.0;
+                    if (durationS > 0 && dur > 0 && Math.Abs(dur - durationS) > 20) continue;
+                    found.Add((s.GetProperty("id").GetInt64(), dur, ts));
+                }
+            }
+        }
+        catch
+        {
+            return null;
+        }
+        return found;
     }
 
     /// <summary>网易云应答的 code 是不是 200。缺 code 也按异常算：正常应答一向带着它，
@@ -800,7 +867,8 @@ public static partial class Lyrics
 
     private const double MinTextSim = 0.6;    // 配对所需的文本相似度下限
     private const double MinMergedSim = 0.8;  // 一对多/多对一合并配对的下限（拼回来该几乎逐字相同）
-    private const int MaxLineShiftMs = 3000;  // 扣除全局偏移后仍允许的行首时间差
+    private const int MaxLineShiftMs = 3000;  // 扣除局部偏移后仍允许的行首时间差（见 LocalOffsets）
+    private const int MaxAnchorShiftMs = 15000; // 锚点偏离全局偏移的上限，即能跟上的最大漂移
     // 一个主歌词行最多认领几个连续的 KRC 行。原先只算两行，而酷狗对「A（A）」这种
     // 括注重复句常拆到四行（实测 KICK BACK「ハッピー ラッキー こんにちはベイビー
     // (ハッピー ラッキー こんにちはベイビー)」拆成 4 行）：单行比整句连 MinTextSim
@@ -809,6 +877,7 @@ public static partial class Lyrics
     // 封在 4 是因为再往上就得靠 MinMergedSim 独自兜着了，而拼进来的行越多，
     // 「凑巧凑够相似度」的风险越大
     private const int MaxKrcSpan = 4;
+    private const int MinResegmentLen = 4; // 归一化后不足这么多字符的主行，按主歌词重切时只认原样出现（见 BuildByMainLines）
 
     // 「主歌词是译文、KRC 是原文」的识别阈值（见 TryAlignAsTranslated）
     private const double MaxKanaHangulRatio = 0.02; // 主歌词侧作为中文译文的假名/谚文上限
@@ -858,9 +927,89 @@ public static partial class Lyrics
         return result;
     }
 
-    /// <summary>行级对齐结果：配对（主歌词行下标, KRC 行下标）按时间正序，
-    /// 以及两个曲库之间的系统性时间差（KRC 行首减主歌词行首的中位数，毫秒）。</summary>
-    private sealed record Alignment(List<(int Main, int Krc)> Pairs, int OffsetMs);
+    /// <summary>行级对齐结果：配对（主歌词行下标, KRC 行下标）按时间正序；
+    /// 两个曲库之间的系统性时间差（KRC 行首减主歌词行首的中位数，毫秒），换算显示时间用；
+    /// 以及逐个主歌词行的局部时间差（见 LocalOffsets），判断两行时间上对不对得上用。</summary>
+    private sealed record Alignment(List<(int Main, int Krc)> Pairs, int OffsetMs, int[]? LocalMs = null)
+    {
+        /// <summary>主歌词第 i 行处的时间差：有逐行估计就用逐行的，没有（纯时间对齐）退回全局。</summary>
+        public int ShiftAt(int i) => LocalMs?[i] ?? OffsetMs;
+    }
+
+    /// <summary>逐个主歌词行估计「KRC 行首减主歌词行首」的局部时间差。
+    ///
+    /// 两个曲库对同一首歌的时间差并不恒定，会逐段漂移：实测「アンノウン・マザーグース」
+    /// 网易云那份与 KRC 前半首只差 0.5s 上下，第二段主歌起一路差到 4~5s（其余几家曲库在
+    /// 那几句上都与 KRC 一致，多半是那份投稿后半首打轴拖了拍）。全局偏移配 ±MaxLineShiftMs
+    /// 的容差把后半首文本几乎一字不差的三十多行全拦在门外，主歌词 88 行都带译文，最后只挂上 48 行。
+    /// 容差不能直接放宽：它防的就是副歌重复句配到隔壁那一遍上去。
+    ///
+    /// 做法：文本完全相等的行对当锚点，取两侧下标都严格递增的最长锚点链——单调性把
+    /// 重复句配到别处那一遍的锚点排掉（同 AlignLines 的 DP）——链上相邻锚点之间按时间
+    /// 线性插值。容差改为相对「这一段的偏移」，漂移多少都跟得上，重复句照旧拦得住。</summary>
+    private static int[] LocalOffsets(List<LyricLine> mainLines, List<KrcLine> krcLines,
+        List<string> normMain, List<string> normKrc, int globalMs)
+    {
+        var n = mainLines.Count;
+        var local = new int[n];
+        Array.Fill(local, globalMs);
+        // 按 (主行, KRC 行) 的字典序收集，下面的链 DP 依赖这个顺序
+        var anchors = new List<(int I, int J, int D)>();
+        for (var i = 0; i < n; i++)
+        {
+            if (normMain[i].Length == 0) continue;
+            for (var j = 0; j < krcLines.Count; j++)
+            {
+                if (normKrc[j] != normMain[i]) continue;
+                var d = krcLines[j].StartMs - mainLines[i].Ms;
+                if (Math.Abs(d - globalMs) <= MaxAnchorShiftMs) anchors.Add((i, j, d));
+            }
+        }
+        if (anchors.Count == 0) return local;
+
+        // 最长单调链：len[k] 为以锚点 k 结尾的最长链。同样长时取偏移跳变总量小的那条：
+        // 副歌整段重复时「错开一遍」的链可能与正确的链一样长，但它的偏移会跳一整遍的时长
+        var len = new int[anchors.Count];
+        var jump = new long[anchors.Count];
+        var prev = new int[anchors.Count];
+        var end = 0;
+        for (var k = 0; k < anchors.Count; k++)
+        {
+            (len[k], jump[k], prev[k]) = (1, 0, -1);
+            for (var p = 0; p < k; p++)
+            {
+                if (anchors[p].I >= anchors[k].I || anchors[p].J >= anchors[k].J) continue;
+                var l = len[p] + 1;
+                var jp = jump[p] + Math.Abs(anchors[k].D - anchors[p].D);
+                if (l > len[k] || (l == len[k] && jp < jump[k])) (len[k], jump[k], prev[k]) = (l, jp, p);
+            }
+            if (len[k] > len[end] || (len[k] == len[end] && jump[k] < jump[end])) end = k;
+        }
+        var chain = new List<(int I, int D)>();
+        for (var k = end; k >= 0; k = prev[k]) chain.Add((anchors[k].I, anchors[k].D));
+        chain.Reverse();
+        // 三点中值滤掉孤立的错锚（「啊」「la」这种短句最容易配到别处），台阶式的真漂移不受影响
+        var ds = chain.Select(c => c.D).ToArray();
+        for (var k = 1; k < chain.Count - 1; k++)
+        {
+            int a = ds[k - 1], b = ds[k], c = ds[k + 1];
+            chain[k] = (chain[k].I, Math.Max(Math.Min(a, b), Math.Min(Math.Max(a, b), c)));
+        }
+
+        // 链头之前、链尾之后沿用端点的偏移，中间按主歌词时间线性插值
+        var t = 0;
+        for (var i = 0; i < n; i++)
+        {
+            while (t + 1 < chain.Count && chain[t + 1].I <= i) t++;
+            var (ia, da) = chain[t];
+            if (i <= ia || t + 1 == chain.Count) { local[i] = da; continue; }
+            var (ib, db) = chain[t + 1];
+            var span = mainLines[ib].Ms - mainLines[ia].Ms;
+            local[i] = span <= 0 ? da
+                : da + (int)((long)(db - da) * (mainLines[i].Ms - mainLines[ia].Ms) / span);
+        }
+        return local;
+    }
 
     /// <summary>把主歌词的行与 KRC 的行一一对上（谁挂谁由调用方决定）。
     ///
@@ -872,8 +1021,8 @@ public static partial class Lyrics
     ///   2. 单一全局偏移：两版间奏长度不同时偏移是逐段漂移的，固定容差挡不住；
     ///   3. 贪心 + 独占：副歌重复行里靠前的行会抢走本属于后面某行的 KRC 行。
     /// 改成整首歌一次单调序列对齐（DP）：两边本来都是按时间有序的序列，单调对齐天然
-    /// 解决重复行抢占与局部漂移；文本改用相似度而非相等；配上行首时间差平移后，
-    /// 时间容差可以放宽到只用来拦「整体错配到另一首歌」。</summary>
+    /// 解决重复行抢占；文本改用相似度而非相等；时间容差相对逐行估计的局部偏移算
+    /// （见 LocalOffsets），只用来拦「配到另一遍重复句 / 整体错配到另一首歌」。</summary>
     private static Alignment AlignLines(
         List<LyricLine> mainLines, List<KrcLine> krcLines)
     {
@@ -899,16 +1048,18 @@ public static partial class Lyrics
         }
         diffs.Sort();
         var offset = diffs.Count > 0 ? diffs[diffs.Count / 2] : 0;
+        var local = LocalOffsets(mainLines, krcLines, normMain, normKrc, offset);
 
         // 配对得分矩阵（0 = 不允许配对）。除 1:1 外还算「一个主行 ↔ 相邻 k 个 KRC 行」
         // （k 到 MaxKrcSpan）与「相邻两个主行 ↔ 一个 KRC 行」：两个曲库对同一首歌的断句
         // 粒度常不同——KRC 按「唱的断句」把一句拆成好几行，或反过来把两句并成一行。
         // 严格 1:1 时这些行整片落空，且相似度还会双双跌破阈值（Lemon 首句：网易云一行
-        // 16 字、KRC 拆成 4+12 两行，单看任一半的相似度只有 0.4）
-        double Score(string a, int aMs, string b, int bMs, double min)
+        // 16 字、KRC 拆成 4+12 两行，单看任一半的相似度只有 0.4）。
+        // mi 是这组配对里打头的主歌词行，时间差按它那一处的局部偏移算
+        double Score(string a, int mi, string b, int bMs, double min)
         {
             if (a.Length == 0 || b.Length == 0) return 0;
-            if (Math.Abs(bMs - offset - aMs) > MaxLineShiftMs) return 0;
+            if (Math.Abs(bMs - local[mi] - mainLines[mi].Ms) > MaxLineShiftMs) return 0;
             var s = Similarity(a, b);
             return s >= min ? s : 0;
         }
@@ -921,7 +1072,7 @@ public static partial class Lyrics
         {
             for (var j = 0; j < m; j++)
             {
-                sim[i, j] = Score(normMain[i], mainLines[i].Ms,
+                sim[i, j] = Score(normMain[i], i,
                     normKrc[j], krcLines[j].StartMs, MinTextSim);
                 // 合并只认高相似度：拆行拼回来本该几乎逐字相同，阈值松了会把
                 // 一句歌词旁边那行无关的短句也一起吞进来
@@ -932,11 +1083,11 @@ public static partial class Lyrics
                     // 拼过头就不必再往前接：相似度上限是 2×短的/总长，拼接串一旦超过
                     // 主行长度的 1.5 倍这个上限就跌破 0.8，而 cat 只会越接越长
                     if (cat.Length * 2 > normMain[i].Length * 3) break;
-                    simSpan[i, j, k] = Score(normMain[i], mainLines[i].Ms,
+                    simSpan[i, j, k] = Score(normMain[i], i,
                         cat, krcLines[j - k + 1].StartMs, MinMergedSim);
                 }
                 if (i > 0)
-                    sim2x1[i, j] = Score(normMain[i - 1] + normMain[i], mainLines[i - 1].Ms,
+                    sim2x1[i, j] = Score(normMain[i - 1] + normMain[i], i - 1,
                         normKrc[j], krcLines[j].StartMs, MinMergedSim);
             }
         }
@@ -1005,7 +1156,7 @@ public static partial class Lyrics
             else jj--;
         }
         pairs.Reverse(); // 回溯是从尾往头走的，转成时间正序方便调用方顺着用
-        return new Alignment(pairs, offset);
+        return new Alignment(pairs, offset, local);
     }
 
     /// <summary>分三类算字符占比：(假名与谚文, 拉丁字母, 汉字)，分母为非空白字符数。
@@ -1169,8 +1320,10 @@ public static partial class Lyrics
             // 二对一（一个 KRC 行覆盖了两个主行）：字表没有能拆开的锚点，按字数硬切纯属猜，
             // 只给第一个主行用，另一行退回匀速合成
             if (!usedKrc.Add(j)) continue;
-            // KRC 那行的字时间是相对它自己的行首的，挂到主歌词行上要补两行行首之差
-            var shift = krcLines[j].StartMs - al.OffsetMs - mainLines[i].Ms;
+            // KRC 那行的字时间是相对它自己的行首的，挂到主歌词行上要补两行行首之差。
+            // 扣的是这一处的局部偏移：两侧打轴漂开几秒的段落里扣全局偏移，整行的字会
+            // 跟着漂几秒，扫过条要么提前走完、要么迟迟不动
+            var shift = krcLines[j].StartMs - al.ShiftAt(i) - mainLines[i].Ms;
             var words = ShiftWords(krcLines[j].Words, shift);
             // 一对多（KRC 把这一句拆成好几行唱）：那几行的字表接起来正好覆盖主行全文。
             // 复制一份再接，ShiftWords 在 shift 为 0 时会把原 list 直接还回来
@@ -1229,7 +1382,7 @@ public static partial class Lyrics
             if (!mainOf.TryGetValue(j + 1, out var next) || next.Count != 1) continue;
             var i = next[0];
             if (krcsOf[i].Count != 1 || string.IsNullOrEmpty(mainLines[i].Trans)) continue;
-            var mainMs = mainLines[i].Ms + al.OffsetMs;          // 换到 KRC 时间轴
+            var mainMs = mainLines[i].Ms + al.ShiftAt(i);        // 换到 KRC 时间轴（按局部偏移）
             var dj = Math.Abs(mainMs - krcLines[j].StartMs);
             if (dj > 1500 || dj >= Math.Abs(mainMs - krcLines[j + 1].StartMs)) continue;
             // 文本闸：吸附等于把这两行并成一行显示，那么拼起来必须比原先那一行更像
@@ -1301,7 +1454,9 @@ public static partial class Lyrics
         {
             if (headOf.TryGetValue(j, out var head) && head != j) continue; // 已并进组首那行
             // 换算回主歌词那一侧的时间轴：播放进度由播放器上报，对应的是它自己那份音频，
-            // 直接用 KRC 的绝对时间会整首歌偏一个两版之差
+            // 直接用 KRC 的绝对时间会整首歌偏一个两版之差。
+            // 这里刻意扣全局偏移而不是局部偏移：局部漂移实测多出在 LRC 投稿那侧（后半首
+            // 打轴拖拍，其余曲库都与 KRC 一致），按局部扣等于把 KRC 精确的时间轴改成拖拍的那份
             var ms = Math.Max(0, krcLines[j].StartMs - al.OffsetMs);
             if (karaoke.ContainsKey(ms)) continue; // 撞到同一毫秒（如 offset 把开头几行都压到 0）
             var text = krcLines[j].Plain;
@@ -1310,9 +1465,15 @@ public static partial class Lyrics
             {
                 words = new List<KaraokeWord>();
                 foreach (var g in group)
+                {
                     // 并进来的行，字时间要从「相对自己行首」改成「相对组首行的行首」
-                    words.AddRange(ShiftWords(krcLines[g].Words,
-                        krcLines[g].StartMs - krcLines[j].StartMs));
+                    var add = ShiftWords(krcLines[g].Words, krcLines[g].StartMs - krcLines[j].StartMs);
+                    // 西文两行直接相接会把词粘死（实测 fish in the pool 显示成「on my toeslet me」），
+                    // 补的空格挂在前一行末字上：显示文本由字表拼出，这样两边仍严格同源
+                    if (words.Count > 0 && add.Count > 0 && NeedsSpace(words[^1].Text, add[0].Text))
+                        words[^1] = words[^1] with { Text = words[^1].Text + " " };
+                    words.AddRange(add);
+                }
                 // 文本按 ParseKrc 的同一公式重算：高亮边界是逐字累加字宽算出来的，
                 // 显示文本必须与字表严格同源，拿 Plain 直接相接会因它已 Trim 过而错位
                 text = string.Concat(words.Select(w => w.Text)).Trim();
@@ -1321,6 +1482,357 @@ public static partial class Lyrics
             karaoke[ms] = words;
         }
         return (lines, karaoke);
+    }
+
+    /// <summary>方案 C（主歌词带译文时的默认路，闸门见 FetchAsync）：文本与逐字照旧取自 KRC，
+    /// 断句改跟主歌词走——把 KRC 全曲的字摊平成一条流，按主歌词每一行占了其中哪一段重新切行，
+    /// 译文原样挂在自己那一句上。
+    ///
+    /// 为什么不沿用 BuildFromKrc 的「按行配对再挂译文」：两个曲库断句的位置常常是错开的，
+    /// 而不只是粗细不同。实测 ヘクとパスカル「fish in the pool」开头三句：
+    ///     主歌词  Let me hear~ ｜ the sound of your heartbeat on my toes. ｜ Let me touch my ear on your chest.
+    ///     KRC     Let me hear the sound of your heartbeat ｜ on my toes ｜ let me touch my ear on your chest
+    /// 行与行之间不是一对一、一对多、多对一里的任何一种，按行挂译文只能挂歪：第一行才唱到
+    /// heartbeat，译文已经说到「我踮起脚尖」；on my toes 又被并到下一句头上。
+    /// 「アンノウン・マザーグース」里这样的错位有五六处，还有一句主歌词被挤得一行都配不上、
+    /// 译文直接丢了。主人反馈的「歌词和译文的单句不是严格对应的」就是这一类。
+    ///
+    /// 主歌词那侧原文与译文的逐行对应是严格的（同一份投稿、同一组时间戳），所以只要照主歌词的
+    /// 断句切，对应关系就歪不了；逐字时间戳是跟着字走的，切在哪儿都不损失。BuildFromKrc 里的
+    /// 向后吸附、一对多合并、夹逼填空，在这里都只是「这一行占了哪一段」的自然结果。
+    ///
+    /// 做法：两侧归一化后的全曲字符流做一次最长公共子序列对齐，主歌词每行只许配到时间上
+    /// 够得着的那一段 KRC（窗口同 AlignLines，按局部偏移算）；得到每行在 KRC 字流里的起止后，
+    /// 没被任何主行认领的字按 KRC 自己的行归并。返回 null 表示这条路走不通，调用方退回 BuildFromKrc。</summary>
+    private static (List<LyricLine> Lines, Dictionary<int, List<KaraokeWord>> Karaoke)? BuildByMainLines(
+        List<LyricLine> mainLines, List<KrcLine> krcLines, Alignment al)
+    {
+        // KRC 摊平成字流：每个字记所属行与绝对时间；kWord 把归一化后的字符映回它所在的字
+        // （西文一个「字」是一个单词，归一化后占好几个字符；标点和空白归一化后不占字符）
+        var words = new List<KaraokeWord>();
+        var wLine = new List<int>();
+        var wAbs = new List<int>();
+        var wFirstQ = new List<int>(); // 字的第一个归一化字符在字流里的下标（-1 = 归一化后是空的）
+        var kChar = new List<char>();
+        var kWord = new List<int>();
+        for (var j = 0; j < krcLines.Count; j++)
+        {
+            foreach (var w in krcLines[j].Words)
+            {
+                var norm = NormalizeForMatch(w.Text);
+                wFirstQ.Add(norm.Length > 0 ? kChar.Count : -1);
+                foreach (var c in norm)
+                {
+                    kChar.Add(c);
+                    kWord.Add(words.Count);
+                }
+                words.Add(w);
+                wLine.Add(j);
+                wAbs.Add(krcLines[j].StartMs + w.OffsetMs);
+            }
+        }
+        var n = mainLines.Count;
+        var wn = words.Count;
+        var normMain = mainLines.Select(l => NormalizeForMatch(l.Text)).ToList();
+        var mChar = new List<char>();
+        var mLine = new List<int>();
+        var mSep = new List<bool?>(); // 主歌词这个字符在原文里跟前一个字符之间隔没隔着空白/标点（null = 不知道）
+        for (var i = 0; i < n; i++)
+        {
+            var seps = SeparatedBefore(mainLines[i].Text);
+            // 繁简转换按理逐字一一对应，万一长度对不上就不用这份标记
+            var sepOk = seps.Count == normMain[i].Length;
+            for (var k = 0; k < normMain[i].Length; k++)
+            {
+                mChar.Add(normMain[i][k]);
+                mLine.Add(i);
+                mSep.Add(sepOk && k > 0 ? seps[k] : null);
+            }
+        }
+        if (mChar.Count == 0 || kChar.Count == 0) return null;
+
+        // 每个主行在 KRC 字符流上够得着的区间 [lo, hi]（从 1 起数）：自己行首前 MaxLineShiftMs
+        // 到下一行行首后 MaxLineShiftMs，时间先按局部偏移换到 KRC 那一侧。作用同 AlignLines 的
+        // 时间闸——不拦的话副歌重复句会配到隔壁那一遍去。
+        // 区间逐行单调不减，下面的带状 DP 靠这一点只存带内的格子
+        var kTime = new int[kChar.Count];
+        for (var q = 0; q < kTime.Length; q++)
+            kTime[q] = q == 0 ? wAbs[kWord[q]] : Math.Max(kTime[q - 1], wAbs[kWord[q]]);
+        int CountBelow(int t) // kTime 里小于 t 的个数（kTime 已单调）
+        {
+            var (l, r) = (0, kTime.Length);
+            while (l < r)
+            {
+                var mid = (l + r) / 2;
+                if (kTime[mid] < t) l = mid + 1;
+                else r = mid;
+            }
+            return l;
+        }
+        var bandLo = new int[n];
+        var bandHi = new int[n];
+        long cells = 0;
+        for (var i = 0; i < n; i++)
+        {
+            var s = mainLines[i].Ms + al.ShiftAt(i);
+            var e = i + 1 < n ? Math.Max(s, mainLines[i + 1].Ms + al.ShiftAt(i + 1)) : int.MaxValue / 2;
+            var lo = CountBelow(s - MaxLineShiftMs) + 1;
+            var hi = CountBelow(e + MaxLineShiftMs + 1);
+            if (i > 0) (lo, hi) = (Math.Max(lo, bandLo[i - 1]), Math.Max(hi, bandHi[i - 1]));
+            (bandLo[i], bandHi[i]) = (lo, Math.Max(hi, lo - 1));
+            cells += (long)normMain[i].Length * (bandHi[i] - lo + 2);
+        }
+        // 极端长的歌、或时间窗被拉得极宽：不值得为一首歌的歌词临时占几十 MB
+        if (cells > 4_000_000) return null;
+
+        // 带状最长公共子序列：dp[p][q] = 主歌词前 p 个字符与 KRC 前 q 个字符最多能配上几个，
+        // 第 p 行只存 q ∈ [lo-1, hi] 这一段。带外的值不必存：带左侧等于上一行同列，
+        // 带右侧等于本行带内最后一格（hi 之后这一行再没有可配的字符）
+        var pn = mChar.Count;
+        var rowLo = new int[pn + 1];
+        var rows = new int[pn + 1][];
+        rowLo[0] = 1;
+        rows[0] = new int[1];
+        int Get(int p, int q)
+        {
+            var r = rows[p];
+            var k = q - rowLo[p] + 1;
+            return r[k < r.Length ? k : r.Length - 1];
+        }
+        for (var p = 1; p <= pn; p++)
+        {
+            var (lo, hi) = (bandLo[mLine[p - 1]], bandHi[mLine[p - 1]]);
+            var r = new int[hi - lo + 2];
+            r[0] = Get(p - 1, lo - 1);
+            var c = mChar[p - 1];
+            for (var q = lo; q <= hi; q++)
+            {
+                var best = Math.Max(Get(p - 1, q), r[q - lo]);
+                if (c == kChar[q - 1]) best = Math.Max(best, Get(p - 1, q - 1) + 1);
+                r[q - lo + 1] = best;
+            }
+            rowLo[p] = lo;
+            rows[p] = r;
+        }
+
+        // 回溯：matchK[p] = 主歌词第 p 个字符配到的 KRC 字符下标（-1 = 没配上）。
+        // 能走对角就走对角，等价于「同样多的配法里尽量往后配」
+        var matchK = new int[pn];
+        Array.Fill(matchK, -1);
+        for (int p = pn, q = rowLo[pn] + rows[pn].Length - 2; p > 0;)
+        {
+            var lo = rowLo[p];
+            if (q >= lo && mChar[p - 1] == kChar[q - 1] && rows[p][q - lo + 1] == Get(p - 1, q - 1) + 1)
+            {
+                matchK[p - 1] = q - 1;
+                q--;
+            }
+            else if (q >= lo && rows[p][q - lo + 1] == rows[p][q - lo])
+            {
+                q--;
+                continue;
+            }
+            p--;
+            // 换到上一行：q 超出那一行带的右端就夹回去（带右侧的值都等于带内最后一格）
+            q = Math.Min(q, rowLo[p] + rows[p].Length - 2);
+        }
+
+        // 每个主行认领它配上的那一段字。owner[w] = 第 w 个字归哪个主行（-1 = 没人认领）
+        var owner = new int[wn];
+        Array.Fill(owner, -1);
+        var ownCnt = new int[wn];
+        var curLine = new int[wn];
+        Array.Fill(curLine, -1);
+        var curCnt = new int[wn];
+        var qs = new List<int>();
+        for (int i = 0, p = 0; i < n; i++)
+        {
+            var len = normMain[i].Length;
+            qs.Clear();
+            for (var k = 0; k < len; k++, p++)
+                if (matchK[p] >= 0) qs.Add(matchK[p]);
+            if (qs.Count == 0) continue;
+            // 只留最密的一段：最长公共子序列只管配得多，零星的字会被它配到窗口里老远的
+            // 同一个字上（假名、虚词到处都是），照单全收的话这一行会把中间不相干的字全吞进来。
+            // 密度就用 Similarity 的同一公式：2×配上的 / (主行长 + 这一段 KRC 的长)
+            var (ba, bb, sim) = (0, 0, 0.0);
+            for (var a = 0; a < qs.Count; a++)
+            {
+                for (var b = qs.Count - 1; b >= a; b--)
+                {
+                    var s = 2.0 * (b - a + 1) / (len + qs[b] - qs[a] + 1);
+                    if (s > sim) (ba, bb, sim) = (a, b, s);
+                }
+            }
+            if (sim < MinTextSim) continue;
+            // 极短的行（「ねえ」「Oh」）只认原样整段出现：两三个字符凑够相似度太容易了，
+            // 从别的句子里抠出一个「あ」当成这一行，会把那句歌词切掉一个字
+            if (len < MinResegmentLen && (bb - ba + 1 != len || qs[bb] - qs[ba] + 1 != len)) continue;
+            for (var k = ba; k <= bb; k++)
+            {
+                // 一个字被前后两个主行各配上一部分（主行的断句落在一个西文单词中间）：归配得多的那行
+                var w = kWord[qs[k]];
+                if (curLine[w] != i) (curLine[w], curCnt[w]) = (i, 0);
+                if (++curCnt[w] > ownCnt[w]) (owner[w], ownCnt[w]) = (i, curCnt[w]);
+            }
+        }
+        // 一行认领的首尾两个字之间全归它：夹在中间没配上的是和声、语气词、两侧写法不同的字。
+        // 对齐是单调的，别的主行不可能落在这中间
+        for (var w = 0; w < wn;)
+        {
+            var i = owner[w];
+            if (i < 0)
+            {
+                w++;
+                continue;
+            }
+            var last = w;
+            for (var v = w + 1; v < wn && (owner[v] < 0 || owner[v] == i); v++)
+                if (owner[v] == i) last = v;
+            for (var v = w; v <= last; v++) owner[v] = i;
+            w = last + 1;
+        }
+
+        // 没人认领的字，按 KRC 自己的行处理：
+        //   · 所在的 KRC 行另一头已归了某个主行（那句多唱了几个字、或两侧写法不同没配上）→ 跟着那个主行；
+        //   · 整个 KRC 行都没人认领（主歌词没有这一句）→ 自己成一行。
+        var kTrans = new Dictionary<int, string>(); // 自己成行的 KRC 行 -> 夹逼补上的译文
+        for (var a = 0; a < wn;)
+        {
+            if (owner[a] >= 0)
+            {
+                a++;
+                continue;
+            }
+            var b = a;
+            while (b + 1 < wn && owner[b + 1] < 0) b++;
+            var x = a > 0 ? owner[a - 1] : -1;      // 这段空隙前面的主行
+            var y = b + 1 < wn ? owner[b + 1] : -1; // 后面的主行
+            var alone = new List<int>();
+            for (var sa = a; sa <= b;)
+            {
+                var sb = sa;
+                while (sb < b && wLine[sb + 1] == wLine[sa]) sb++;
+                var sharesPrev = sa > 0 && wLine[sa - 1] == wLine[sa];
+                var sharesNext = sb + 1 < wn && wLine[sb + 1] == wLine[sb];
+                if (sharesPrev && sharesNext)
+                {
+                    // 同一个 KRC 行里夹在两句主歌词之间：恰有一处空白就在那儿切开，否则都跟前一句
+                    var (cut, cands) = (sb + 1, 0);
+                    for (var c = sa; c <= sb + 1; c++)
+                    {
+                        if (!words[c - 1].Text.EndsWith(' ') && !words[c - 1].Text.EndsWith('　')
+                            && !words[c].Text.StartsWith(' ') && !words[c].Text.StartsWith('　')) continue;
+                        cut = c;
+                        cands++;
+                    }
+                    if (cands != 1) cut = sb + 1;
+                    for (var w = sa; w <= sb; w++) owner[w] = w < cut ? x : y;
+                }
+                else if (sharesPrev || sharesNext)
+                {
+                    for (var w = sa; w <= sb; w++) owner[w] = sharesPrev ? x : y;
+                }
+                else
+                {
+                    alone.Add(wLine[sa]);
+                }
+                sa = sb + 1;
+            }
+            // 夹逼填空（判据与理由同 BuildFromKrc）：前后两个主行之间正好漏了一句主歌词，
+            // 空隙里也正好只有一个没人认领的 KRC 行，那它们只能是同一句——文本没对上是用词差太多
+            if (alone.Count == 1 && x >= 0 && y - x == 2 && !string.IsNullOrEmpty(mainLines[x + 1].Trans))
+                kTrans[alone[0]] = mainLines[x + 1].Trans!;
+            a = b + 1;
+        }
+
+        // 按归属切成显示行。没译文的主行不并：KRC 的细断句本身更好读（理由同 BuildFromKrc），
+        // 所以它那一段里再按 KRC 的行切开
+        (int Main, int Krc) IdOf(int w) => owner[w] < 0 ? (-1, wLine[w])
+            : string.IsNullOrEmpty(mainLines[owner[w]].Trans) ? (owner[w], wLine[w]) : (owner[w], -1);
+        var kToMain = new int[kChar.Count];
+        Array.Fill(kToMain, -1);
+        for (var p = 0; p < pn; p++)
+            if (matchK[p] >= 0) kToMain[matchK[p]] = p;
+        // 两个 KRC 行并进同一显示行，接缝处补不补空格：照主歌词原文在这儿有没有断开。
+        // 光看字符种类会把日文粘死——主歌词写「愛すりゃいいじゃん 泣けばいいじゃん」，
+        // 酷狗拆成两行，直接相接就成了一整串；「feeling」接「私は」也一样。
+        // 接缝后那个字没配上主歌词时才退回按字符种类猜
+        bool JoinSpace(int w, int line, string left, string right)
+        {
+            if (left.Length == 0 || right.Length == 0 || char.IsWhiteSpace(left[^1]) || char.IsWhiteSpace(right[0]))
+                return false;
+            var p = wFirstQ[w] >= 0 ? kToMain[wFirstQ[w]] : -1;
+            return p >= 0 && mLine[p] == line && mSep[p] is { } sep ? sep : NeedsSpace(left, right);
+        }
+        var lines = new List<LyricLine>();
+        var karaoke = new Dictionary<int, List<KaraokeWord>>();
+        var placed = 0;
+        for (int a = 0, b; a < wn; a = b + 1)
+        {
+            var id = IdOf(a);
+            b = a;
+            while (b + 1 < wn && IdOf(b + 1) == id) b++;
+            var first = a;
+            while (first < b && string.IsNullOrWhiteSpace(words[first].Text)) first++;
+            // 换算回主歌词那一侧的时间轴，刻意扣全局偏移而不是局部偏移（理由见 BuildFromKrc）
+            var ms = Math.Max(0, wAbs[first] - al.OffsetMs);
+            if (karaoke.ContainsKey(ms)) continue; // 撞到同一毫秒
+            var list = new List<KaraokeWord>(b - first + 1);
+            for (var w = first; w <= b; w++)
+            {
+                // 显示文本由字表拼出（高亮边界是逐字累加字宽算的，两边必须严格同源）：
+                // 行首的空白直接从字上去掉；跨 KRC 行相接处要补的空格挂在前一个字上
+                var text = w == first ? words[w].Text.TrimStart() : words[w].Text;
+                if (w > first && wLine[w] != wLine[w - 1] && JoinSpace(w, id.Main, list[^1].Text, text))
+                    list[^1] = list[^1] with { Text = list[^1].Text + " " };
+                // 字时间改成相对这一显示行的行首
+                list.Add(new KaraokeWord(Math.Max(0, wAbs[w] - wAbs[first]), words[w].DurationMs, text));
+            }
+            var lineText = string.Concat(list.Select(w => w.Text)).TrimEnd();
+            if (lineText.Length == 0) continue;
+            var trans = id.Main >= 0 ? mainLines[id.Main].Trans : kTrans.GetValueOrDefault(wLine[first]);
+            if (string.IsNullOrEmpty(trans)) trans = null;
+            else placed++;
+            lines.Add(new LyricLine(ms, lineText, trans));
+            karaoke[ms] = list;
+        }
+
+        // 兜底：挂上的译文明显少于按行配对能配上的句数，说明字符流对齐在这首歌上出了岔子
+        var paired = al.Pairs.Select(p => p.Main).Distinct()
+            .Count(i => !string.IsNullOrEmpty(mainLines[i].Trans));
+        return placed < paired * 0.9 ? null : (lines, karaoke);
+    }
+
+    /// <summary>两段文本首尾相接处要不要补空格：只在两侧都不是中日韩文字时补
+    /// （中日文本就不靠空格断词，「張り裂けて」接「叫ばせて」补了反倒难看）。</summary>
+    private static bool NeedsSpace(string left, string right)
+    {
+        if (left.Length == 0 || right.Length == 0) return false;
+        char a = left[^1], b = right[0];
+        if (char.IsWhiteSpace(a) || char.IsWhiteSpace(b)) return false;
+        return a < '⺀' && b < '⺀'; // U+2E80 起是 CJK 部首、假名、汉字、谚文等
+    }
+
+    /// <summary>与 NormalizeForMatch 留下的字符逐个对应：这个字符跟前一个留下的字符之间，
+    /// 原文里有没有被滤掉的空白或标点。第一个字符前面没有字符，恒为 false。</summary>
+    private static List<bool> SeparatedBefore(string s)
+    {
+        var flags = new List<bool>(s.Length);
+        var gap = false;
+        foreach (var c in s)
+        {
+            var ch = c;
+            if (ch is >= '\uFF01' and <= '\uFF5E') ch = (char)(ch - 0xFEE0); // 与 NormalizeForMatch 同一套取舍
+            if (!char.IsLetterOrDigit(ch))
+            {
+                gap = true;
+                continue;
+            }
+            flags.Add(flags.Count > 0 && gap);
+            gap = false;
+        }
+        return flags;
     }
 
     /// <summary>为没匹配到逐字数据的行合成匀速扫过：西文按单词、其余按字符切分单元，
@@ -1492,7 +2004,10 @@ public static partial class Lyrics
                     //      会把大段歌词丢掉。
                     var covered = al.Pairs.Count / (double)krc.Count;
                     if (covered >= 0.5 && krc.Count >= lines.Count * 0.6)
-                        (lines, karaoke) = BuildFromKrc(lines, krc, al);
+                        // 带译文的歌按主歌词的断句重切，译文才能逐句对得上（见 BuildByMainLines）；
+                        // 它走不通、或这首歌压根没有译文（KRC 自己的细断句更好读）时照旧按 KRC 的行来
+                        (lines, karaoke) = (lines.Any(l => !string.IsNullOrEmpty(l.Trans))
+                            ? BuildByMainLines(lines, krc, al) : null) ?? BuildFromKrc(lines, krc, al);
                     // 文本对不上还有一种成因不是「搜错歌」：这份投稿的主歌词整份是中文
                     // 译文，原文只在 KRC 那侧。此时反转不但照旧成立，而且是唯一能让原文
                     // 上屏的路（判据全靠时间轴与语言，见 TryAlignAsTranslated）

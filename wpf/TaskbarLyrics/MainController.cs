@@ -291,10 +291,13 @@ public sealed class MainController : IDisposable
             img.StreamSource = new MemoryStream(bytes);
             img.EndInit();
             img.Freeze();
-            // 只过滤「近纯白且几乎无细节」的占位图（网易云无封面时返回的白图）；
-            // 低对比度的真实封面（深色/素色）保留显示
-            var (stddev, mean) = GrayStats(img);
-            if (!(stddev < 8 && mean > 180)) cover = img;
+            // 只过滤「近纯白、几乎无细节、且没有颜色」的占位图（网易云无封面时返回的白图）；
+            // 低对比度的真实封面（深色/素色）保留显示。色度这道闸是后加的：
+            // 实测ヘクとパスカル「fish in the pool」的封面是一张淡蓝色插画，缩到 8x8
+            // 后灰度均值 192、标准差 7.2，前两道闸全中，被当成占位图扔了；而白占位图是
+            // 纯灰的（色度 2.9），这张有 59.9
+            var (stddev, mean, chroma) = CoverStats(img);
+            if (!(stddev < 8 && mean > 180 && chroma < 12)) cover = img;
         }
         catch
         {
@@ -303,8 +306,9 @@ public sealed class MainController : IDisposable
         Live?.SetCover(cover); // null 时显示音符占位，不再留空白
     }
 
-    /// <summary>缩放到 8x8 灰度图算 (标准差, 均值)（对应 PIL 的 ImageStat）。</summary>
-    private static (double Stddev, double Mean) GrayStats(BitmapSource img)
+    /// <summary>缩放到 8x8 算灰度的 (标准差, 均值)（对应 PIL 的 ImageStat），
+    /// 外加色度：逐像素 RGB 最大分量减最小分量的平均，纯灰图为 0。</summary>
+    private static (double Stddev, double Mean, double Chroma) CoverStats(BitmapSource img)
     {
         var scaled = new TransformedBitmap(img,
             new ScaleTransform(8.0 / img.PixelWidth, 8.0 / img.PixelHeight));
@@ -316,7 +320,16 @@ public sealed class MainController : IDisposable
         mean /= pixels.Length;
         var varSum = 0.0;
         foreach (var b in pixels) varSum += (b - mean) * (b - mean);
-        return (Math.Sqrt(varSum / pixels.Length), mean);
+        var bgra = new FormatConvertedBitmap(scaled, PixelFormats.Bgra32, null, 0);
+        var color = new byte[64 * 4];
+        bgra.CopyPixels(color, 8 * 4, 0);
+        var chroma = 0.0;
+        for (var p = 0; p < color.Length; p += 4)
+        {
+            var (b, g, r) = (color[p], color[p + 1], color[p + 2]);
+            chroma += Math.Max(r, Math.Max(g, b)) - Math.Min(r, Math.Min(g, b));
+        }
+        return (Math.Sqrt(varSum / pixels.Length), mean, chroma / 64);
     }
 
     // ---- 歌词节拍（UI 线程 50ms）----
