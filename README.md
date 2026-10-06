@@ -7,6 +7,8 @@
 
 在 Windows 任务栏里显示正在播放的歌的歌词。歌词条是任务栏的子窗口，不是浮在上面的悬浮窗。
 
+![演示](docs/demo.gif)
+
 ## 下载
 
 在 [Releases](https://github.com/ChissaQAQ/TaskbarLyrics/releases/latest) 下载 `TaskbarLyrics.exe`，双击运行，不用安装。
