@@ -369,7 +369,6 @@ public sealed class MainController : IDisposable
         string translation;
         IReadOnlyList<KaraokeWord>? words = null;
         double lineElapsed = 0;
-        var nextLineMode = false; // 第二行显示的是“下一句”（无译文/罗马音时）
         var lines = _lines;
         if (lines is { Count: > 0 })
         {
@@ -422,10 +421,7 @@ public sealed class MainController : IDisposable
                 // 无译文/罗马音时（如中文歌），第二行显示下一句歌词
                 if (translation.Length == 0 && Cfg.SecondLine != "off"
                     && index + 1 < lines.Count)
-                {
                     translation = lines[index + 1].Text;
-                    nextLineMode = true;
-                }
                 var lineStart = lines[index].Ms;
                 lineElapsed = Math.Max(0, posMs - lineStart);
                 if (orig.Length > 0 && Cfg.Karaoke)
@@ -467,7 +463,7 @@ public sealed class MainController : IDisposable
             _shownOriginal = original;
             _shownTranslation = translation;
             _shownHasWords = hasWords;
-            Overlay.SetLine(original, translation, words, lineElapsed, state.Playing, nextLineMode);
+            Overlay.SetLine(original, translation, words, lineElapsed, state.Playing);
         }
         else
         {

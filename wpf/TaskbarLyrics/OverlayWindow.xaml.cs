@@ -207,12 +207,13 @@ public partial class OverlayWindow : Window
     // ---- 内容 ----
 
     /// <summary>切行/切歌时调用：重建行视觉并做滑动动画。
-    /// nextLineMode=true（第二行是“下一句”而非译文）时用传送带动画：
-    /// 旧块上移一个行距，下一句补位到上行，新的下一句从下面进入。</summary>
+    /// 旧块的第二行正好是新块的首行（第二行显示的是“下一句”）时用传送带动画：
+    /// 旧块上移一个行距，下一句补位到上行，新的第二行从下面进入。</summary>
     public void SetLine(string original, string translation, IReadOnlyList<KaraokeWord>? words,
-        double lineElapsedMs, bool playing, bool nextLineMode = false)
+        double lineElapsedMs, bool playing)
     {
         var animate = original.Length > 0 && _original.Length > 0 && original != _original;
+        var oldSecond = _translation;
         _original = original;
         _translation = translation;
         SetHasContent(original.Length > 0);
@@ -257,12 +258,18 @@ public partial class OverlayWindow : Window
             // 低通滤波、改 transform，一直烧到切行动画结束
             FreezeScrolling(oldLine);
 
-            var conveyor = nextLineMode
+            // 走传送带只看一件事：旧块第二行的字是不是就是新块的首行。
+            // 不能看新行自己是不是「下一句模式」——译文、无译文穿插的歌里，
+            // 有译文行切到无译文行时旧块下面是译文，被当成共享句就会把译文形变成另一句；
+            // 前奏（歌名/歌手）切到首句同理，歌手名会长成首句。
+            // 反过来无译文行切到有译文行时，旧块下面那句正是新的当前句，
+            // 走整行传送带的话同一句会一份往上退场、一份从下面进场，叠着出现两遍
+            var conveyor = oldSecond.Length > 0 && oldSecond == original
                            && oldLine is Panel osp && osp.Children.Count > 1
                            && ((FrameworkElement)osp.Children[0]).ActualHeight > 4;
             if (conveyor)
             {
-                // 传送带切行（第二行是下一句）：旧块整体上移一个行距，
+                // 传送带切行（旧块第二行就是新的当前句）：旧块整体上移一个行距，
                 // 新块同速从下方进入——旧下行与新上行是同一句，看起来就是它补位上去。
                 // 行距必须取第二行的实际偏移（含两行间距）：只算第一行高度会差 3px，
                 // 旧下行和新上行永远错开，动画全程重影、结尾还跳一下（「残留」的根因）
@@ -285,17 +292,20 @@ public partial class OverlayWindow : Window
                 var oldTop = (FrameworkElement)osp2.Children[0];
                 AddAnim(sb, oldTop, OpacityPath, oldTop.Opacity, 0, FadeLeaving);
                 var oldBottom = (FrameworkElement)osp2.Children[1];
-                if (visual is Panel nsp && nsp.Children.Count > 1
-                    && oldBottom is ScrollingTextHost from && nsp.Children[0] is ScrollingTextHost to)
+                if (oldBottom is ScrollingTextHost from && visual.Children[0] is ScrollingTextHost to)
                 {
                     // 共享句（旧下行与新上行是同一句）：小号灰字边往上走边长成大号白字，
                     // 而不是大字在首行原地浮现。要量两行文字的实际排版，放到布局落定之后（见 AddMorph）
                     to.Opacity = 0;
                     addAfterLayout = () => AddMorph(sb, from, to);
-                    // 新的“下一句”从底边进来，同样贴边淡入
-                    var bottom = (FrameworkElement)nsp.Children[1];
-                    bottom.Opacity = 0;
-                    AddAnim(sb, bottom, OpacityPath, 0, 1, FadeEntering);
+                    // 新的第二行（下一句或译文）从底边进来，同样贴边淡入。
+                    // 末句没有第二行：新块只有共享句一行，形变照做
+                    if (visual.Children.Count > 1)
+                    {
+                        var bottom = (FrameworkElement)visual.Children[1];
+                        bottom.Opacity = 0;
+                        AddAnim(sb, bottom, OpacityPath, 0, 1, FadeEntering);
+                    }
                 }
                 else
                 {
