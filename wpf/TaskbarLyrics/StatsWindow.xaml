@@ -1,0 +1,293 @@
+<Window x:Class="TaskbarLyrics.StatsWindow"
+        x:ClassModifier="internal"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="任务栏歌词 - 听歌统计" Width="920" Height="760" MinWidth="740" MinHeight="520"
+        WindowStartupLocation="CenterScreen" ResizeMode="CanResizeWithGrip"
+        Background="{DynamicResource SolidBackgroundFillColorBaseBrush}">
+    <!-- 单页仪表盘：概览卡 → 趋势图 → 按时间范围的明细（小结、歌曲/歌手/专辑/新歌榜、24 小时分布、
+         一周热力图、播放器）→ 趣味发现。页头的播放器筛选对整页生效。
+         样式与模板在 StatsResources.xaml，年度报告窗口也用那一份 -->
+    <Window.Resources>
+        <ResourceDictionary Source="StatsResources.xaml"/>
+    </Window.Resources>
+
+    <ScrollViewer x:Name="Scroller" VerticalScrollBarVisibility="Auto">
+        <!-- DashboardRoot：自测截图（stats-test shot）渲染的就是它 -->
+        <StackPanel x:Name="DashboardRoot" Margin="28,20,28,24">
+            <!-- 页头 -->
+            <Grid Margin="0,0,0,16">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel>
+                    <TextBlock Style="{StaticResource PageHeader}" Text="听歌统计" Margin="0,2,0,2"/>
+                    <TextBlock x:Name="SinceText" Style="{StaticResource RowDesc}" Text="正在统计…"/>
+                    <TextBlock x:Name="StatusText" Style="{StaticResource PanelNote}" Margin="0,3,0,0"
+                               Foreground="{DynamicResource AccentTextFillColorPrimaryBrush}"/>
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <!-- 只听一个播放器、又没在筛选时收起：下拉框里只有「全部」和那一个，没什么可选的 -->
+                    <ComboBox x:Name="PlayerBox" MinWidth="140" VerticalAlignment="Center" Visibility="Collapsed"
+                              ToolTip="只看某个播放器里听的歌（整页的数字都跟着变）"
+                              SelectionChanged="Player_Changed"/>
+                    <Button x:Name="YearButton" Padding="12,5" Margin="8,0,0,0" VerticalAlignment="Center"
+                            Click="Year_Click" ToolTip="按年份汇总的一张报告，可以存成图片">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Style="{StaticResource ToolIcon}" Text="&#xE787;"/>
+                            <TextBlock Text="年度报告" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="ShareButton" Padding="12,5" Margin="8,0,0,0" VerticalAlignment="Center"
+                            Click="Share_Click" ToolTip="把当前页面存成图片（不含底部的数据位置）">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Style="{StaticResource ToolIcon}" Text="&#xE72D;"/>
+                            <TextBlock Text="分享" VerticalAlignment="Center"/>
+                            <TextBlock Style="{StaticResource ToolIcon}" Text="&#xE70D;" FontSize="9" Margin="8,1,0,0"/>
+                        </StackPanel>
+                        <Button.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="保存为图片…" Click="SaveImage_Click"/>
+                                <MenuItem Header="复制图片" Click="CopyImage_Click"/>
+                            </ContextMenu>
+                        </Button.ContextMenu>
+                    </Button>
+                    <Button x:Name="RefreshButton" Padding="12,5" Margin="8,0,0,0" VerticalAlignment="Center"
+                            Click="Refresh_Click">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Style="{StaticResource ToolIcon}" Text="&#xE72C;"/>
+                            <TextBlock Text="刷新" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+            </Grid>
+
+            <!-- 记录已关闭 -->
+            <Border x:Name="DisabledCard" Style="{StaticResource Card}" Visibility="Collapsed">
+                <Grid Margin="0,9">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                        <TextBlock Style="{StaticResource RowTitle}" Text="听歌记录已关闭"/>
+                        <TextBlock x:Name="DisabledDesc" Style="{StaticResource RowDesc}"/>
+                    </StackPanel>
+                    <Button Grid.Column="1" Content="开启记录" Padding="12,5" VerticalAlignment="Center" Click="Enable_Click"/>
+                </Grid>
+            </Border>
+
+            <!-- 还没有数据 -->
+            <Border x:Name="EmptyCard" Style="{StaticResource Panel}" Visibility="Collapsed" Padding="18,36">
+                <StackPanel HorizontalAlignment="Center">
+                    <TextBlock Text="&#xE8D6;" FontFamily="Segoe MDL2 Assets" FontSize="36" HorizontalAlignment="Center"
+                               Foreground="{DynamicResource TextFillColorTertiaryBrush}"/>
+                    <TextBlock Text="还没有听歌记录" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Center"
+                               Margin="0,14,0,6" Foreground="{DynamicResource TextFillColorPrimaryBrush}"/>
+                    <TextBlock x:Name="EmptyDesc" FontSize="12"
+                               HorizontalAlignment="Center" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                </StackPanel>
+            </Border>
+
+            <!-- ContentPanel：「分享」存成图片的就是这一块，页头、提示条、页脚的数据位置都不在里面 -->
+            <StackPanel x:Name="ContentPanel" Visibility="Collapsed">
+                <!-- 概览五格 -->
+                <ItemsControl x:Name="OverviewList" Margin="-5,0,-5,9" ItemTemplate="{StaticResource FactTemplate}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <UniformGrid Rows="1"/>
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                </ItemsControl>
+
+                <!-- 趋势 -->
+                <Border Style="{StaticResource Panel}">
+                    <StackPanel>
+                        <Grid Margin="0,0,0,14">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Style="{StaticResource PanelTitle}" Text="听歌时长趋势"/>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                <RadioButton x:Name="TrendDay" Style="{StaticResource Seg}" GroupName="Trend" Content="近 30 天"
+                                             IsChecked="True" Checked="Trend_Checked"/>
+                                <RadioButton x:Name="TrendWeek" Style="{StaticResource Seg}" GroupName="Trend" Content="近 12 周"
+                                             Checked="Trend_Checked"/>
+                                <RadioButton x:Name="TrendMonth" Style="{StaticResource Seg}" GroupName="Trend" Content="近 12 个月"
+                                             Checked="Trend_Checked"/>
+                            </StackPanel>
+                        </Grid>
+                        <ItemsControl x:Name="TrendChart" ItemsPanel="{StaticResource BarPanel}"
+                                      ItemTemplate="{StaticResource BarTemplate}"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- 按时间范围的明细 -->
+                <Grid Margin="0,8,0,10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Style="{StaticResource CardHeader}" Text="听了些什么" FontSize="16" Margin="2,0,0,0"
+                               VerticalAlignment="Center"/>
+                    <!-- 榜单排序：歌曲、歌手、专辑、新歌四张榜一起切 -->
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="0,0,16,0">
+                        <RadioButton x:Name="SortPlays" Style="{StaticResource Seg}" GroupName="Sort" Content="按次数"
+                                     IsChecked="True" Checked="Sort_Checked"/>
+                        <RadioButton x:Name="SortTime" Style="{StaticResource Seg}" GroupName="Sort" Content="按时长"
+                                     Checked="Sort_Checked"/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="2" Orientation="Horizontal">
+                        <RadioButton x:Name="RangeWeek" Style="{StaticResource Seg}" GroupName="Range" Content="近 7 天"
+                                     Checked="Range_Checked"/>
+                        <RadioButton x:Name="RangeMonth" Style="{StaticResource Seg}" GroupName="Range" Content="近 30 天"
+                                     IsChecked="True" Checked="Range_Checked"/>
+                        <RadioButton x:Name="RangeYear" Style="{StaticResource Seg}" GroupName="Range" Content="今年"
+                                     Checked="Range_Checked"/>
+                        <RadioButton x:Name="RangeAll" Style="{StaticResource Seg}" GroupName="Range" Content="全部"
+                                     Checked="Range_Checked"/>
+                    </StackPanel>
+                </Grid>
+
+                <Border Style="{StaticResource Panel}">
+                    <TextBlock x:Name="SummaryText" FontSize="14" TextWrapping="Wrap" LineHeight="22"
+                               Foreground="{DynamicResource TextFillColorPrimaryBrush}"/>
+                </Border>
+
+                <StackPanel x:Name="RangeDetail">
+                    <!-- 2×2 四张榜：同一行的两张卡片等高 -->
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="14"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <Border Style="{StaticResource Panel}">
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource PanelTitle}" Text="最常听的歌" Margin="0,0,0,6"/>
+                                <ItemsControl x:Name="SongList" ItemTemplate="{StaticResource RankTemplate}"/>
+                            </StackPanel>
+                        </Border>
+                        <Border Grid.Column="2" Style="{StaticResource Panel}">
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource PanelTitle}" Text="最常听的歌手" Margin="0,0,0,6"/>
+                                <ItemsControl x:Name="ArtistList" ItemTemplate="{StaticResource RankTemplate}"/>
+                            </StackPanel>
+                        </Border>
+                        <Border Grid.Row="1" Style="{StaticResource Panel}">
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource PanelTitle}" Text="最常听的专辑" Margin="0,0,0,6"/>
+                                <ItemsControl x:Name="AlbumList" ItemTemplate="{StaticResource RankTemplate}"/>
+                                <TextBlock x:Name="AlbumNote" Style="{StaticResource PanelNote}"/>
+                            </StackPanel>
+                        </Border>
+                        <Border Grid.Row="1" Grid.Column="2" Style="{StaticResource Panel}">
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource PanelTitle}" Text="新发现的歌" Margin="0,0,0,6"/>
+                                <ItemsControl x:Name="NewSongList" ItemTemplate="{StaticResource RankTemplate}"/>
+                                <TextBlock x:Name="NewSongNote" Style="{StaticResource PanelNote}"/>
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+
+                    <Border Style="{StaticResource Panel}">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource PanelTitle}" Text="一天里什么时候听"/>
+                            <TextBlock x:Name="PeakText" Style="{StaticResource RowDesc}" Margin="0,4,0,14"/>
+                            <ItemsControl x:Name="HourChart" ItemsPanel="{StaticResource BarPanel}"
+                                          ItemTemplate="{StaticResource BarTemplate}"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- 一周热力图：7 行（周一到周日）× 24 列（钟点） -->
+                    <Border Style="{StaticResource Panel}">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource PanelTitle}" Text="一周里什么时候听"/>
+                            <TextBlock x:Name="HeatText" Style="{StaticResource RowDesc}" Margin="0,4,0,14"/>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <UniformGrid Rows="7" Margin="0,0,8,0">
+                                    <TextBlock Text="周一" Style="{StaticResource HeatLabel}"/>
+                                    <TextBlock Text="周二" Style="{StaticResource HeatLabel}"/>
+                                    <TextBlock Text="周三" Style="{StaticResource HeatLabel}"/>
+                                    <TextBlock Text="周四" Style="{StaticResource HeatLabel}"/>
+                                    <TextBlock Text="周五" Style="{StaticResource HeatLabel}"/>
+                                    <TextBlock Text="周六" Style="{StaticResource HeatLabel}"/>
+                                    <TextBlock Text="周日" Style="{StaticResource HeatLabel}"/>
+                                </UniformGrid>
+                                <ItemsControl x:Name="HeatChart" Grid.Column="1" ItemTemplate="{StaticResource HeatTemplate}">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <UniformGrid Rows="7" Columns="24"/>
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                </ItemsControl>
+                                <ItemsControl x:Name="HeatHours" Grid.Row="1" Grid.Column="1" Margin="0,4,0,0">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <UniformGrid Rows="1" Columns="24"/>
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding}" FontSize="11" TextAlignment="Center" Margin="-12,0"
+                                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </Grid>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- 只看某个播放器时收起：那时只剩一个播放器，占比恒为 100% -->
+                    <Border x:Name="PlayerPanel" Style="{StaticResource Panel}">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource PanelTitle}" Text="用什么播放器听" Margin="0,0,0,6"/>
+                            <ItemsControl x:Name="PlayerList" ItemTemplate="{StaticResource RankTemplate}"/>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+                <!-- 趣味发现（不随上面的时间范围变） -->
+                <TextBlock Style="{StaticResource CardHeader}" Text="趣味发现" FontSize="16" Margin="2,8,0,5"/>
+                <ItemsControl x:Name="FactsList" Margin="-5,0,-5,9" ItemTemplate="{StaticResource FactTemplate}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <UniformGrid Columns="3"/>
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                </ItemsControl>
+            </StackPanel>
+
+            <!-- 页脚：数据位置（路径里有用户名，所以不在 ContentPanel 里，分享图不会带上它） -->
+            <Border Style="{StaticResource Card}">
+                <Grid Margin="0,9">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                        <TextBlock Style="{StaticResource RowTitle}" Text="数据只存在本机"/>
+                        <TextBlock x:Name="DataPathText" Style="{StaticResource RowDesc}"/>
+                    </StackPanel>
+                    <Button Grid.Column="1" Content="打开文件夹" Padding="12,5" VerticalAlignment="Center"
+                            Click="OpenFolder_Click"/>
+                </Grid>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Window>

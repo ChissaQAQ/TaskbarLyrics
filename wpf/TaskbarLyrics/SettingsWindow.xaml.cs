@@ -58,8 +58,8 @@ public partial class SettingsWindow : Window
         if (!string.IsNullOrEmpty(dir)) OpenExternal(dir);
     }
 
-    /// <summary>打不开就只记日志：这是个纯附带的便利入口，不值得弹窗打断。</summary>
-    private static void OpenExternal(string target)
+    /// <summary>打不开就只记日志：这是个纯附带的便利入口，不值得弹窗打断。统计窗口的「打开文件夹」也用它。</summary>
+    internal static void OpenExternal(string target)
     {
         try { Process.Start(new ProcessStartInfo(target) { UseShellExecute = true }); }
         catch (Exception ex) { Log.Error("openexternal", ex); }
@@ -97,6 +97,8 @@ public partial class SettingsWindow : Window
         AboutVersionText.Text = $"版本 {Updater.CurrentVersion}";
         UpdateCheckSwitch.IsChecked = cfg.UpdateCheck;
         RefreshUpdateUi();
+        StatsSwitch.IsChecked = cfg.StatsEnabled;
+        StatsImagesSwitch.IsChecked = cfg.StatsImages;
 
         SecondLineCombo.SelectedIndex = cfg.SecondLine == "romaji" ? 1 : cfg.SecondLine == "off" ? 2 : 0;
         KaraokeSwitch.IsChecked = cfg.Karaoke;
@@ -171,7 +173,7 @@ public partial class SettingsWindow : Window
     /// <summary>窗口里各项控件的原样取值（下拉框序号、开关状态、输入框原文，不做校验）。</summary>
     private sealed record FormValues(
         int Mode, int Monitor, bool HideOnFullscreen, bool AutoPosition, int AutoSide, int AutoAlign,
-        bool Locked, bool UpdateCheck,
+        bool Locked, bool UpdateCheck, bool StatsEnabled, bool StatsImages,
         int SecondLine, bool Karaoke, string Offset, int Source,
         string Font, string FontSize, bool FontBold, int Align, string Width,
         int ColorMode, string TextColor, string TransColor, bool Shadow, bool ShowCover, bool ShowControls);
@@ -183,7 +185,7 @@ public partial class SettingsWindow : Window
         ModeCombo.SelectedIndex, MonitorCombo.SelectedIndex,
         HideFullscreenSwitch.IsChecked == true, AutoPositionSwitch.IsChecked == true,
         AutoSideCombo.SelectedIndex, AutoAlignCombo.SelectedIndex,
-        LockedSwitch.IsChecked == true, UpdateCheckSwitch.IsChecked == true,
+        LockedSwitch.IsChecked == true, UpdateCheckSwitch.IsChecked == true, StatsSwitch.IsChecked == true, StatsImagesSwitch.IsChecked == true,
         SecondLineCombo.SelectedIndex, KaraokeSwitch.IsChecked == true, OffsetBox.Text,
         SourceCombo.SelectedIndex,
         FontCombo.Text, FontSizeBox.Text, FontBoldSwitch.IsChecked == true,
@@ -272,11 +274,15 @@ public partial class SettingsWindow : Window
         if (now.ShowCover != was.ShowCover) cfg.ShowCover = now.ShowCover;
         if (now.ShowControls != was.ShowControls) cfg.ShowControls = now.ShowControls;
         if (now.UpdateCheck != was.UpdateCheck) cfg.UpdateCheck = now.UpdateCheck;
+        if (now.StatsEnabled != was.StatsEnabled) cfg.StatsEnabled = now.StatsEnabled;
+        if (now.StatsImages != was.StatsImages) cfg.StatsImages = now.StatsImages;
 
         if (now.Locked != was.Locked) _app.SetLocked(now.Locked);
         _app.SetAutostart(AutostartSwitch.IsChecked == true);
         _app.SaveCfg();
         _app.ApplySettings(refetchLyrics: secondLineChanged || karaokeChanged);
+        // 统计窗开着的话按新设置重画：关掉配图就撤图，打开就把本机已存的图配上
+        if (now.StatsImages != was.StatsImages) _app.RefreshStatsWindow();
         // 应用过的就是新基准：否则第二次点「应用」时，第一次改过的项会再被写一遍，
         // 把这期间托盘里对同一项的改动又盖回去
         _baseline = now;
@@ -331,6 +337,33 @@ public partial class SettingsWindow : Window
         CacheStatusText.Text = _app.RefetchLyrics()
             ? $"{what}，当前歌曲正在重新获取"
             : $"{what}，从下一首歌起重新获取";
+    }
+
+    // ---- 听歌统计 ----
+
+    private void OpenStats_Click(object sender, RoutedEventArgs e) => _app.OpenStats();
+
+    /// <summary>统计窗里点了「开启记录」：开关和基准一起改。只改开关的话 Apply 会当成用户动过；
+    /// 不改的话开关一直显示「关」，用户把它拨开再拨回去，跟基准一比没变，点确定也关不掉。</summary>
+    internal void SyncStatsEnabled(bool on)
+    {
+        StatsSwitch.IsChecked = on;
+        _baseline = _baseline with { StatsEnabled = on };
+    }
+
+    private void ClearStats_Click(object sender, RoutedEventArgs e)
+    {
+        if (_app.StatsHeldElsewhere)
+        {
+            StatsStatusText.Text = "任务栏歌词正在运行，请从它的托盘菜单打开设置再清空";
+            return;
+        }
+        if (MessageBox.Show(this, "确定删除全部听歌记录吗？统计会从头开始，删掉的无法恢复。", "任务栏歌词",
+                MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes)
+            return;
+        StatsStatusText.Text = _app.ClearStats()
+            ? "已清空，统计从现在重新开始"
+            : "有记录文件删不掉（可能被别的程序占用），详情见 error.log";
     }
 
     // ---- 检查更新 ----

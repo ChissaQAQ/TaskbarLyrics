@@ -5,7 +5,8 @@
 //
 // 只缓存首选源（网易云）且未降级的结果，理由见 Lyrics.FetchAsync 里写入处的注释。
 // 所以读回来的结果 Degraded / PrimaryNotFound / ArtistMismatch 恒为 false，存储格式里不必带这几个字段
-// （歌手对不上的备胎只在各源都干净地答过「没有原唱」时才缓存，那已是最终答案，不需要再重试）。
+// （歌手对不上的备胎只在各源都干净地答过「没有原唱」时才缓存，那已是最终答案，不需要再重试；
+// 这种条目的匹配 id / 专辑在 FetchAsync 里就已经是 null，读回来也不会冒充原唱）。
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
@@ -17,7 +18,7 @@ public static class LyricsCache
 {
     // 键里带版本号：匹配算法或存储格式一变，旧条目自然失联，由容量淘汰慢慢清掉，
     // 不必写迁移代码，也不会拿旧算法的逐字对齐结果糊弄用户
-    private const int SchemaVersion = 12; // 2: 逐字改以 KRC 文本为主体；3: 修首句译文被抢；4: 补 rv 让罗马音有内容 + 一句译文对两行时并回一行；5: 候选改按译文覆盖率择优 + 配对空隙夹逼填空；6: 向后吸附找回「一对二只认出一半」的那半；7: 认出「主歌词整份是译文、原文在 KRC 侧」的投稿；8: 候选择优改「歌名分数优先、覆盖率用比率」（旧缓存里可能正躺着抓错的 Live 版）；9: 合并配对从「一对二」放宽到「一对多」（旧缓存里躺着被切成两三行、且只有一行带译文的句子）；10: 歌手匹配做繁简/全角/多歌手拆分归一化 + 歌名分数认出 Live/伴奏/翻唱等版本标签，候选选择变了（旧缓存里可能躺着歌手闸失灵时抓错的翻唱/Live 版）；降级结果（首选候选或逐字请求失败）不再缓存，旧缓存里可能冻结着这种残缺结果；11: 制作信息改按位置放宽（开头/结尾整块的「键：值」行、主歌词的「歌名 - 歌手」标题行）+ 剪掉译文行尾的译者署名，缓存存的是滤完的行，旧条目里冻结着漏网的那一两行；同版还改了歌手闸：网易云只有同名翻唱时先去 QQ/LRCLIB 找原唱（旧缓存里可能躺着带时长播放器抓到的翻唱，如「告白氣球」）；以及版本标签补上 acoustic/弾き語り/piano/变速（旧缓存里可能躺着「晩餐歌」的 acoustic 版）；12: 跨曲库配对的时间容差改按局部偏移算（两侧打轴逐段漂移超过 3s 的歌，旧缓存里整段冻结着没译文）+ 带译文的歌按主歌词的断句重切（旧缓存里两侧断句错开处的译文挂歪了一行）+ 网易云歌曲搜索漏掉的曲目按专辑找回（旧缓存里可能躺着退到 QQ 的无译文版本）
+    private const int SchemaVersion = 14; //2: 逐字改以 KRC 文本为主体；3: 修首句译文被抢；4: 补 rv 让罗马音有内容 + 一句译文对两行时并回一行；5: 候选改按译文覆盖率择优 + 配对空隙夹逼填空；6: 向后吸附找回「一对二只认出一半」的那半；7: 认出「主歌词整份是译文、原文在 KRC 侧」的投稿；8: 候选择优改「歌名分数优先、覆盖率用比率」（旧缓存里可能正躺着抓错的 Live 版）；9: 合并配对从「一对二」放宽到「一对多」（旧缓存里躺着被切成两三行、且只有一行带译文的句子）；10: 歌手匹配做繁简/全角/多歌手拆分归一化 + 歌名分数认出 Live/伴奏/翻唱等版本标签，候选选择变了（旧缓存里可能躺着歌手闸失灵时抓错的翻唱/Live 版）；降级结果（首选候选或逐字请求失败）不再缓存，旧缓存里可能冻结着这种残缺结果；11: 制作信息改按位置放宽（开头/结尾整块的「键：值」行、主歌词的「歌名 - 歌手」标题行）+ 剪掉译文行尾的译者署名，缓存存的是滤完的行，旧条目里冻结着漏网的那一两行；同版还改了歌手闸：网易云只有同名翻唱时先去 QQ/LRCLIB 找原唱（旧缓存里可能躺着带时长播放器抓到的翻唱，如「告白氣球」）；以及版本标签补上 acoustic/弾き語り/piano/变速（旧缓存里可能躺着「晩餐歌」的 acoustic 版）；12: 跨曲库配对的时间容差改按局部偏移算（两侧打轴逐段漂移超过 3s 的歌，旧缓存里整段冻结着没译文）+ 带译文的歌按主歌词的断句重切（旧缓存里两侧断句错开处的译文挂歪了一行）+ 网易云歌曲搜索漏掉的曲目按专辑找回（旧缓存里可能躺着退到 QQ 的无译文版本）；13: 记下匹配到的曲目 id 与专辑（听歌统计用），旧条目没有这两个字段；14: 再记下封面地址和歌手头像线索（听歌统计存图用），旧条目没有
     private const int TtlDays = 30;      // 歌词本身不变，但坏结果不该被永久冻结
     private const int MaxFiles = 400;    // 超出后淘汰最旧的一批（约 3~5 MB）
     private const int EvictBatch = 100;
@@ -55,7 +56,8 @@ public static class LyricsCache
             var karaoke = f.K.ToDictionary(
                 k => k.Ms,
                 k => k.W.Select(w => new KaraokeWord(w.O, w.D, w.T)).ToList());
-            return new Lyrics.FetchResult(lines, karaoke, f.Src, f.Dur);
+            return new Lyrics.FetchResult(lines, karaoke, f.Src, f.Dur, MatchId: f.Id, MatchAlbum: f.Al,
+                MatchCover: f.Cv, MatchArtists: f.Ars?.Where(a => a is { Count: 2 }).Select(a => new Lyrics.ArtRef(a[0], a[1])).ToList());
         }
         catch
         {
@@ -75,6 +77,10 @@ public static class LyricsCache
                 Src = result.Source,
                 At = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
                 Dur = result.SongDurationS,
+                Id = result.MatchId,
+                Al = result.MatchAlbum,
+                Cv = result.MatchCover,
+                Ars = result.MatchArtists?.Select(a => new List<string> { a.Name, a.Ref }).ToList(),
                 L = result.Lines.Select(l => new CachedLine { Ms = l.Ms, T = l.Text, Tr = l.Trans }).ToList(),
                 K = result.Karaoke.Select(kv => new CachedKLine
                 {
@@ -150,6 +156,10 @@ public static class LyricsCache
         public string Src { get; set; } = "";
         public long At { get; set; }
         public double Dur { get; set; }
+        public string? Id { get; set; }  // 匹配到的曲目（ne:id），统计用
+        public string? Al { get; set; }  // 它登记的专辑
+        public string? Cv { get; set; }  // 专辑封面地址
+        public List<List<string>>? Ars { get; set; } // 歌手 [名字, 头像线索]
         public List<CachedLine> L { get; set; } = new();
         public List<CachedKLine> K { get; set; } = new();
     }

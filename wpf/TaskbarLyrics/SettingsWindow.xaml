@@ -392,7 +392,7 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
                                         <TextBlock Style="{StaticResource RowTitle}" Text="避让停靠侧"/>
-                                        <TextBlock Style="{StaticResource RowDesc}" Text="自动避让时优先停靠在任务栏的哪半边；空间恢复后会自动回到这边"/>
+                                        <TextBlock Style="{StaticResource RowDesc}" Text="自动避让时停靠在任务栏的哪半边；空间紧时缩短显示，不跳到另一边（这半边被图标占满时除外）"/>
                                     </StackPanel>
                                     <ComboBox x:Name="AutoSideCombo" Grid.Column="1" Style="{StaticResource RowCombo}">
                                         <ComboBoxItem Content="右半边"/>
@@ -453,6 +453,59 @@
                                     </StackPanel>
                                     <ToggleButton x:Name="AutostartSwitch" Grid.Column="1" Style="{StaticResource Switch}"
                                                   VerticalAlignment="Center"/>
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+                        <TextBlock Style="{StaticResource CardHeader}" Text="听歌统计"/>
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <Grid Style="{StaticResource Row}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                                        <TextBlock Style="{StaticResource RowTitle}" Text="记录听歌统计"/>
+                                        <TextBlock Style="{StaticResource RowDesc}" Text="记下听了哪些歌、听了多久，只存在本机、不上传；关闭后不再记录，已有数据保留"/>
+                                    </StackPanel>
+                                    <ToggleButton x:Name="StatsSwitch" Grid.Column="1" Style="{StaticResource Switch}"
+                                                  VerticalAlignment="Center"/>
+                                </Grid>
+                                <Border Style="{StaticResource RowSeparator}"/>
+                                <Grid Style="{StaticResource Row}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                                        <TextBlock Style="{StaticResource RowTitle}" Text="统计页显示封面和头像"/>
+                                        <TextBlock Style="{StaticResource RowDesc}" Text="播放时顺带从网易云、QQ 音乐下载专辑封面和歌手头像，存在本机；关闭后不再下载，也不显示"/>
+                                    </StackPanel>
+                                    <ToggleButton x:Name="StatsImagesSwitch" Grid.Column="1" Style="{StaticResource Switch}"
+                                                  VerticalAlignment="Center"/>
+                                </Grid>
+                                <Border Style="{StaticResource RowSeparator}"/>
+                                <Grid Style="{StaticResource Row}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                                        <TextBlock Style="{StaticResource RowTitle}" Text="查看统计"/>
+                                        <TextBlock Style="{StaticResource RowDesc}" Text="累计时长、最常听的歌和歌手、一天里什么时候听；托盘菜单里也能打开"/>
+                                    </StackPanel>
+                                    <Button Grid.Column="1" Content="打开" HorizontalAlignment="Right" VerticalAlignment="Center"
+                                            Padding="12,5" Click="OpenStats_Click"/>
+                                </Grid>
+                                <Border Style="{StaticResource RowSeparator}"/>
+                                <Grid Style="{StaticResource Row}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                                        <TextBlock Style="{StaticResource RowTitle}" Text="清空听歌统计"/>
+                                        <TextBlock x:Name="StatsStatusText" Style="{StaticResource RowDesc}"
+                                                   Text="删除全部听歌记录，统计从头开始；不可恢复"/>
+                                    </StackPanel>
+                                    <Button Grid.Column="1" Content="清空" HorizontalAlignment="Right" VerticalAlignment="Center"
+                                            Padding="12,5" Click="ClearStats_Click"/>
                                 </Grid>
                             </StackPanel>
                         </Border>

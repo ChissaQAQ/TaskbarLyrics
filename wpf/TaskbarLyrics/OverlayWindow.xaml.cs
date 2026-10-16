@@ -20,7 +20,7 @@ namespace TaskbarLyrics;
 public partial class OverlayWindow : Window
 {
     private static readonly TimeSpan AnimLine = TimeSpan.FromMilliseconds(360); // 切行动画（位移与淡变同长，见 EaseMove）
-    private static readonly TimeSpan AnimFade = TimeSpan.FromMilliseconds(150); // 按钮/遮罩浮现淡出
+    private static readonly TimeSpan AnimHover = TimeSpan.FromMilliseconds(240); // 悬停展开/收起、歌词⇄歌曲信息切换
     private const double ButtonsWidth = 96;                                     // 悬停按钮区占位宽度
     /// <summary>逐字进度允许的漂移（ms），超出才 Seek 校准（见 SyncProgress）。
     /// 取 150ms：小于一个字的典型时长，听感上察觉不到，又足以吸收定时器抖动。</summary>
@@ -47,6 +47,8 @@ public partial class OverlayWindow : Window
     private bool _showingInfo;            // 当前视觉状态：信息层在显示
     private bool _showingButtons;         // 当前视觉状态：按钮在显示
     private bool _maskShown;              // 当前视觉状态：悬停遮罩在显示
+    private double _holdWidthDip;         // 显示层切换动画期间窗口至少保持的宽度（收窄推迟到动画走完）
+    private int _displayGen;              // 显示层切换的代数：被新一轮切换顶掉的动画，收尾时不再动窗口
     private bool IsLeftAlign => Cfg.TextAlign == "left";
     // 居中对齐时窗口以「中心点」为锚：每行歌词宽度自适应变化时文字中心不左右漂移
     private bool CenterAnchored => Cfg.TextAlign != "left";
@@ -62,6 +64,7 @@ public partial class OverlayWindow : Window
     private double _displayWidthDip = 120; // 当前实际窗口宽
     private int _lastHeightDip = 48;
     private (int L, int R)? _autoGap;      // 自动避让算出的任务栏空档（client 像素坐标）
+    private string? _autoGapSide;          // 选出 _autoGap 时的停靠侧
 
     // WinEvent 前台钩子（切前台时即时重摆，不等 1.5s 周期）
     private NativeMethods.WinEventDelegate? _winEventProc;
@@ -133,7 +136,7 @@ public partial class OverlayWindow : Window
         MouseMove += OnMouseMove;
         MouseLeftButtonUp += OnLeftUp;
         MouseRightButtonUp += (_, _) => { if (!Cfg.Locked) _app.ShowContextMenu(); };
-        // 内容区宽度变化（窗口宽随歌词长度/任务栏空档/悬停按钮列变化）即重算滚动距离
+        // 歌词层宽度变化（随歌词长度/任务栏空档变化，悬停不改它）即重算滚动距离
         LinesHost.SizeChanged += (_, _) => ApplyViewportWidth();
         _dockCoalesce.Tick += (_, _) =>
         {
@@ -506,71 +509,122 @@ public partial class OverlayWindow : Window
         UpdateDisplayMode();
     }
 
-    /// <summary>按悬停/信息模式切换显示层：歌词 ⇄ 歌曲信息交叉淡变 + 遮罩淡入，
-    /// 按钮列宽度做 0→96 展开动画、内容列随之平滑右移（Lyricify 式连贯展开）。
-    /// 窗口尺寸瞬时到位（透明区不可见），不做 Win32 逐帧缩放（会掉帧）。</summary>
+    /// <summary>按悬停/信息模式切换显示层：歌词 ⇄ 歌曲信息、悬停遮罩、播放按钮。
+    ///
+    /// 悬停展开是一个连贯的动作：内容（歌词淡出、歌曲信息淡入）右移，按钮像抽屉一样
+    /// 从封面右缘被拉出来，遮罩跟着伸展包住新内容；收起时倒放。
+    /// 只动平移和透明度，不改任何一层的排版——早先是把按钮列宽度 0→96 做布局动画，
+    /// 内容列每帧跟着重排，歌词视口每帧变窄，居中/滚动位置跟着抖。
+    ///
+    /// 先改布局、窗口尺寸，再起动画（理由同 SetLine）：各层记下切换前此刻的视觉位置，
+    /// 布局改完后从那里接着走到新位置，中途被反向打断也是从半路接着回去，不会跳。</summary>
     private void UpdateDisplayMode()
     {
         var showInfo = _hover || _infoMode;
-        var showButtons = _hover && Cfg.ShowControls;
+        // 新手引导的占位还没有播放会话，播放按钮点了也没反应，不拉出来
+        var showButtons = _hover && Cfg.ShowControls && !Cfg.ShowGuide;
         if (showInfo == _showingInfo && showButtons == _showingButtons && _hover == _maskShown) return;
-        var wasButtons = _showingButtons;
+
+        var layers = new FrameworkElement[] { CoverZone, HoverMask, ButtonsPanel, LinesHost, InfoPanel };
+        var oldX = layers.Select(VisualX).ToArray();
+        var oldInfoW = InfoPanel.Width;
+        var oldMaskW = HoverMask.Width;
+        var oldLeft = WindowLeftDip();
+
         _showingInfo = showInfo;
         _showingButtons = showButtons;
         _maskShown = _hover;
         UpdateVisibility(); // 信息显示模式也决定可见性（无歌词行时仍显示歌名/歌手）
-
-        FadeTo(LinesHost, showInfo ? 0.0 : 1.0);
-        FadeTo(InfoPanel, showInfo ? 1.0 : 0.0);
-        FadeTo(HoverMask, _hover ? 1.0 : 0.0); // 悬停遮罩（对标 Win11 任务栏图标）
         ButtonsPanel.IsHitTestVisible = showButtons;
-        FadeTo(ButtonsPanel, showButtons ? 1.0 : 0.0);
-        if (showButtons)
-        {
-            // 按钮轻微右滑入场
-            var tt = new TranslateTransform(-6, 0);
-            ButtonsPanel.RenderTransform = tt;
-            tt.BeginAnimation(TranslateTransform.XProperty, new DoubleAnimation(-6, 0, AnimFade)
-            {
-                EasingFunction = EaseOut,
-            });
-        }
 
-        if (_hover)
-        {
-            Dock(); // 尺寸瞬时到位，透明区看不出变化
-            if (showButtons)
-            {
-                // 按钮列 0→96 展开，内容列随之平滑右移（Lyricify 式连贯展开）
-                ButtonsHost.Width = 0;
-                AnimateButtonsHost(ButtonsWidth, snapDockOnComplete: false);
-            }
-        }
-        else if (wasButtons)
-        {
-            // 收起：按钮列收拢动画结束后再瞬时还原窗口尺寸，避免可见跳变
-            AnimateButtonsHost(0, snapDockOnComplete: true);
-        }
-        else
-        {
-            Dock();
-        }
-    }
+        // 窗口这时只许变宽，收窄留到动画走完（收尾见下）：正在退场的那一层还在原处，
+        // 窗口先缩的话会被右边缘一刀切掉。多留的那截是透明区，看不出来
+        _holdWidthDip = Math.Max(_holdWidthDip, _displayWidthDip);
+        Dock();
+        // 居中/靠右停靠时，窗口变宽连左缘一起挪了：各层先反向补回这段，画面不跳
+        var dx = WindowLeftDip() - oldLeft;
 
-    /// <summary>按钮列宽度展开/收拢动画（200ms 三次缓出）。</summary>
-    private void AnimateButtonsHost(double to, bool snapDockOnComplete)
-    {
-        var anim = new DoubleAnimation(ButtonsHost.ActualWidth, to, TimeSpan.FromMilliseconds(200))
+        // 内容槽：当前显示的那层文字该在的位置（封面右缘，悬停时再让出按钮区）。
+        // 退场的那层也跟着槽走，进场、退场的两层始终叠在一处，一起移动
+        var slot = _lastCoverZoneDip + (showButtons ? ButtonsWidth : 0);
+        var targetX = new[] { 0, 0, 0, slot - LinesHost.Margin.Left, slot - InfoPanel.Margin.Left };
+        var fromX = new double[layers.Length];
+        for (var i = 0; i < layers.Length; i++)
+            fromX[i] = oldX[i] - dx - layers[i].Margin.Left;
+        // 信息层原先看不见：它的位置是上回留下的（头一次悬停时还停在窗口最左边），不作数。
+        // 让它从歌词层此刻的位置出发、和歌词层走同样的距离，不然淡入的字会从按钮底下追上来
+        if (InfoPanel.Opacity <= 0)
+            fromX[4] = oldX[3] - dx - InfoPanel.Margin.Left;
+        // 居中对齐时信息层宽度一变，文字就在层里换了位置：按宽度差补回，让文字中心接着走
+        else if (!IsLeftAlign && !double.IsNaN(oldInfoW) && !double.IsNaN(InfoPanel.Width))
+            fromX[4] += (oldInfoW - InfoPanel.Width) / 2;
+        var targetOpacity = new double?[]
         {
-            EasingFunction = EaseOut,
+            null, // 封面不参与淡变
+            _hover ? 1.0 : 0.0,
+            showButtons ? 1.0 : 0.0,
+            showInfo ? 0.0 : 1.0,
+            showInfo ? 1.0 : 0.0,
         };
-        if (snapDockOnComplete)
-            anim.Completed += (_, _) => Dock();
-        ButtonsHost.BeginAnimation(WidthProperty, anim);
+
+        // 每层每个属性都重新挂一条动画，哪怕起止相同：上一轮没走完的动画得被顶掉，
+        // 留着它的话会接着往旧终点走，走完再弹回基值
+        var sb = new Storyboard { FillBehavior = FillBehavior.Stop };
+        for (var i = 0; i < layers.Length; i++)
+        {
+            var el = layers[i];
+            // 动画只负责过程，基值直接设成终点：走完撤掉动画（FillBehavior.Stop）就停在终点，
+            // 之后 Dock 再改基值也不会被一条「停在终点」的旧动画压住
+            ((TranslateTransform)el.RenderTransform).X = targetX[i];
+            AddAnim(sb, el, TranslateXPath, fromX[i], targetX[i], HoverMove, AnimHover);
+
+            if (targetOpacity[i] is not { } to) continue;
+            var fromOpacity = el.Opacity;
+            el.Opacity = to;
+            // 文字层先出后进：两段不同的字叠在同一处、都半透明的时间越短越不像重影。
+            // 遮罩和按钮是外框，跟着伸缩、拉开的进度走
+            var easing = el == HoverMask || el == ButtonsPanel ? HoverMove
+                : to < fromOpacity ? HoverFadeOut
+                : HoverFadeIn;
+            AddAnim(sb, el, OpacityPath, fromOpacity, to, easing, AnimHover);
+        }
+        // 按钮的裁剪框右缘贴着歌词层左缘（就是内容槽）：两者用同一条曲线走，
+        // 中间每一帧都贴得严丝合缝，按钮像是被内容让出来的，不会有字从按钮上面滑过去
+        var clipFrom = Math.Max(0, fromX[3] + LinesHost.Margin.Left - fromX[2] - ButtonsPanel.Margin.Left);
+        var clipTo = Math.Max(0, targetX[3] + LinesHost.Margin.Left - targetX[2] - ButtonsPanel.Margin.Left);
+        ButtonsClip.Rect = new Rect(0, 0, clipTo, ButtonsClipHeight);
+        var clipAnim = new RectAnimation(new Rect(0, 0, clipFrom, ButtonsClipHeight),
+            new Rect(0, 0, clipTo, ButtonsClipHeight), AnimHover) { EasingFunction = HoverMove };
+        Storyboard.SetTarget(clipAnim, ButtonsPanel);
+        Storyboard.SetTargetProperty(clipAnim, ButtonsClipPath);
+        sb.Children.Add(clipAnim);
+        // 遮罩宽度从当前包住的内容伸缩到新内容。新宽度 Dock 已经设成基值，
+        // 得取基值：上一轮的宽度动画还在跑的话，直接读 Width 拿到的是它的当前值
+        var maskW = (double)HoverMask.GetAnimationBaseValue(WidthProperty);
+        if (!double.IsNaN(oldMaskW) && !double.IsNaN(maskW))
+            AddAnim(sb, HoverMask, WidthPath, oldMaskW, maskW, HoverMove, AnimHover);
+
+        var gen = ++_displayGen;
+        sb.Completed += (_, _) =>
+        {
+            if (gen != _displayGen) return; // 中途又切了：窗口宽度归新一轮管
+            _holdWidthDip = 0;
+            Dock(assertZOrder: false);      // 该收窄的这时才收，画面已经静止
+        };
+        sb.Begin(this);
     }
 
-    /// <summary>淡变/展开统一用三次缓出：线性淡变在起止处显得生硬。</summary>
-    private static readonly IEasingFunction EaseOut = new CubicEase { EasingMode = EasingMode.EaseOut };
+    /// <summary>元素此刻的视觉横坐标：布局位置（左边距）+ 平移（含进行中动画的当前值）。</summary>
+    private static double VisualX(FrameworkElement el)
+        => el.Margin.Left + ((TranslateTransform)el.RenderTransform).X;
+
+    /// <summary>窗口左缘的屏幕坐标（DIP）。</summary>
+    private double WindowLeftDip()
+    {
+        if (_hwnd == IntPtr.Zero) return 0;
+        NativeMethods.GetWindowRect(_hwnd, out var rc);
+        return rc.Left / DpiScaleX();
+    }
 
     /// <summary>切行动画的缓动：正弦缓入缓出。
     ///
@@ -627,7 +681,28 @@ public partial class OverlayWindow : Window
     private static readonly IEasingFunction MorphIn = new TimeWindow(0, 0.35);
     private static readonly IEasingFunction MorphOut = new TimeWindow(0.2, 0.45);
 
+    /// <summary>三次贝塞尔缓动（同 CSS cubic-bezier）。</summary>
+    private sealed class BezierEase(double x1, double y1, double x2, double y2) : IEasingFunction
+    {
+        private readonly KeySpline _spline = Freeze(new KeySpline(x1, y1, x2, y2));
+        public double Ease(double t) => _spline.GetSplineProgress(t);
+    }
+
+    /// <summary>悬停展开/收起的位移曲线：起步从零速度缓缓加速，后段长长地减速停稳
+    /// （Material 的标准曲线）。悬停要跟手，不能像切行那样两头对称地慢；
+    /// 但也不用纯缓出——第一帧要排版、光栅化按钮和信息层，最容易丢帧，
+    /// 这时速度还接近零，丢一帧看不出位移跳变。</summary>
+    private static readonly IEasingFunction HoverMove = new BezierEase(0.4, 0, 0.2, 1);
+    // 文字层先出后进：退场的在前 32% 淡没，进场的从 28% 开始、90% 时就位（之后只剩位移收尾）。
+    // 交接处两层都只剩零头，看不出两段字叠着
+    private static readonly IEasingFunction HoverFadeOut = new TimeWindow(0, 0.32);
+    private static readonly IEasingFunction HoverFadeIn = new TimeWindow(0.28, 0.9);
+
     private static readonly PropertyPath OpacityPath = new("Opacity");
+    private static readonly PropertyPath WidthPath = new("Width");
+    private static readonly PropertyPath ButtonsClipPath = new("(UIElement.Clip).(RectangleGeometry.Rect)");
+    private const double ButtonsClipHeight = 1000; // 裁剪框只管横向，纵向给足
+    private static readonly PropertyPath TranslateXPath = new("(UIElement.RenderTransform).(TranslateTransform.X)");
     private static readonly PropertyPath TranslateYPath = new("(UIElement.RenderTransform).(TranslateTransform.Y)");
     // 共享句形变挂在文本本体上：变换组里 [0] 是缩放、[1] 是平移（见 ScrollingTextHost.ApplyMorph）
     private static readonly PropertyPath MorphScaleXPath =
@@ -639,20 +714,13 @@ public partial class OverlayWindow : Window
     private static readonly PropertyPath MorphYPath =
         new("(UIElement.RenderTransform).(TransformGroup.Children)[1].(TranslateTransform.Y)");
 
-    /// <summary>透明度淡变。必须显式给 From（取当前有效值）：
-    /// DoubleAnimation 只给 To 时起点取属性「基值」而非当前动画值——
-    /// 被上一轮动画改到 1 的 Opacity 其基值仍是 XAML 里的 0，
-    /// 再动画到 0 就成了 0→0，元素瞬间消失而不是淡出。</summary>
-    private static void FadeTo(UIElement el, double target)
-        => el.BeginAnimation(OpacityProperty,
-            new DoubleAnimation(el.Opacity, target, AnimFade) { EasingFunction = EaseOut });
-
-    /// <summary>加一条切行动画（时长 AnimLine，缓动省略时用 EaseMove，理由见那里）。
-    /// From 同样必须显式给，理由见 FadeTo。</summary>
+    /// <summary>加一条动画（时长省略时为切行的 AnimLine，缓动省略时用 EaseMove，理由见那里）。
+    /// From 必须显式给（取当前有效值）：DoubleAnimation 只给 To 时起点取属性「基值」
+    /// 而非当前动画值，上一轮动画没走完就被接手的话会先跳回基值再出发。</summary>
     private static void AddAnim(Storyboard sb, FrameworkElement target, PropertyPath path,
-        double from, double to, IEasingFunction? easing = null)
+        double from, double to, IEasingFunction? easing = null, TimeSpan? duration = null)
     {
-        var anim = new DoubleAnimation(from, to, AnimLine) { EasingFunction = easing ?? EaseMove };
+        var anim = new DoubleAnimation(from, to, duration ?? AnimLine) { EasingFunction = easing ?? EaseMove };
         Storyboard.SetTarget(anim, target);
         Storyboard.SetTargetProperty(anim, path);
         sb.Children.Add(anim);
@@ -716,7 +784,7 @@ public partial class OverlayWindow : Window
 
     /// <summary>把内容区可用宽度告知当前行：滚动逻辑要的是视口宽，
     /// 不能由行自身的 ActualWidth 反推（溢出时自身被文本撑宽，会自激振荡）。
-    /// LinesHost 宽度只由窗口宽决定（star 列），不受行内容影响，是稳定的视口信号。</summary>
+    /// LinesHost 宽度由 Dock 显式指定，不受行内容影响，是稳定的视口信号。</summary>
     private void ApplyViewportWidth()
     {
         var w = LinesHost.ActualWidth;
@@ -825,9 +893,38 @@ public partial class OverlayWindow : Window
         // 用 Win32 ShowWindow 直接控制：手动 SetParent 后 WPF 的 Visibility
         // 属性与 Win32 的 WS_VISIBLE 会脱钩（WPF 认为可见但窗口实际不显示）
         if (_hwnd != IntPtr.Zero)
+        {
             NativeMethods.ShowWindow(_hwnd, show ? NativeMethods.SW_SHOWNA : NativeMethods.SW_HIDE);
+            _sentShow = show;
+        }
         else
             Visibility = show ? Visibility.Visible : Visibility.Hidden; // 句柄创建前的启动期
+    }
+
+    private bool? _sentShow; // UpdateVisibility 最近一次下发的显隐，还没下发过为 null
+    private int _visFixes;   // 被别人改掉、纠正回来的次数，只给前几次记日志
+
+    /// <summary>周期核对（1.5s）：窗口实际显没显示和 WantVisible 对不上就纠正。
+    /// 显隐只在状态变化时下发一次，窗口被别人藏掉的话这边永远不知道：主人遇到过
+    /// 歌词条在副屏任务栏下面一直藏着，进程照跑、歌词照抓，切歌也救不回来——
+    /// _hasContent 一直是 true，SetHasContent 不会再下发显示。那次前后任务栏的 UIA 枚举
+    /// 卡了 90s，多半是任务栏那边重排时把子窗口藏了，没能确证，所以纠正之外记一笔留现场。
+    /// 看的是自己的 WS_VISIBLE 而不是 IsWindowVisible：后者连父窗口一起算，
+    /// 任务栏自己藏起来（自动隐藏、全屏应用）时会误判成被藏，每轮白纠正一次</summary>
+    public void EnsureVisibility()
+    {
+        if (_hwnd == IntPtr.Zero || _destroyed) return;
+        var shown = (NativeMethods.GetWindowLongPtr(_hwnd, NativeMethods.GWL_STYLE) & NativeMethods.WS_VISIBLE) != 0;
+        // 读完再验句柄：死句柄读出来的样式也是 0，那不是被藏，是宿主任务栏连带把这个窗口销毁了
+        // （explorer 崩溃），交给计时器下一拍重建。先读后验，读之前死的验得出，读之后死的读到的还是真的
+        if (!shown && !NativeMethods.IsWindow(_hwnd)) return;
+        var want = WantVisible;
+        if (shown == want) return;
+        // 下发过的显隐被改掉了才是别人动的手。启动时 Show() 出来、还没放歌的那个空窗口
+        // 是这边从没下发过，悄悄藏起就行，不记
+        if (_sentShow == want && ++_visFixes <= 3)
+            Log.Note("overlay", want ? "歌词窗口被别的程序藏起来了，已重新显示" : "歌词窗口被别的程序显示出来了，已重新藏起");
+        UpdateVisibility();
     }
 
     // ---- 锁定 ----
@@ -863,6 +960,9 @@ public partial class OverlayWindow : Window
     // 内容区窄于这个宽度（DIP）时长歌词只剩几个字在那滚，读不成句子。
     // 到这一步宁可把封面收掉，把地方全让给文字
     private const double MinContentDip = 160;
+    // 自动避让选档时当前空档的黏性（DIP）：比一个任务栏图标位（44）略宽，
+    // 开关一个应用、小组件换一段文字这类小变动都不足以把窗口挤去别的空档（见 PickGap）
+    private const double GapStickDip = 48;
 
     /// <summary>按当前模式与配置摆放窗口（周期调用以跟随任务栏变化/重建）。
     /// assertZOrder=false 时位置尺寸没变就什么都不做，不再顺手断言层级（切行路径用，见 SetLine）。</summary>
@@ -879,6 +979,8 @@ public partial class OverlayWindow : Window
         if (_showingButtons)
             contentW = Math.Max(contentW, _lyricsWidthDip);
         var targetWidth = contentW + coverZone + buttonsZone;
+        // 歌词层宽度始终按「不悬停」算：悬停展开/收起时歌词只平移淡出，不重排（见 UpdateDisplayMode）
+        var lyricsW = _lyricsWidthDip;
 
         // 自动避让任务栏元素：窗口宽度跟随空档——空档内尽量用满
         // （上限 = 设置的最大宽度 + 封面 + 按钮），空档收窄时同步收窄，
@@ -889,36 +991,45 @@ public partial class OverlayWindow : Window
             if (trayHwnd != IntPtr.Zero)
             {
                 var dpi = DpiScaleX();
-                var wantDip = Cfg.Width + coverZone + buttonsZone;
+                // 选空档、收不收封面都按「不悬停」的宽度算：悬停多出来的按钮区只在当前空档里挤，
+                // 否则鼠标一放上去，窗口可能嫌这档装不下按钮而跳去别的空档、或者把封面收掉
+                var wantDip = Cfg.Width + coverZone;
                 // 最小可接受宽度按「收掉封面后的文字底线」算：宁可先牺牲封面，
                 // 也不要为了留住封面把整条挤到读不了的宽度
-                var minDip = MinContentDip + buttonsZone + GapPad * 2 / dpi;
+                var minDip = MinContentDip + GapPad * 2 / dpi;
                 (int L, int R)? gap = null;
                 // 还一次空档都没拿到时（启动期窗口通常是藏着的）照常测：否则第一句歌词出来时
                 // 手上没有快照，窗口会先按默认位置摆出来再跳进空档
                 if (WantVisible || !_autoGap.HasValue)
+                    // 设置里换了停靠侧就不带旧空档：带着的话 PickGap 会当成「被挤去了对面」，
+                    // 新那半边要空出最小可读宽度才肯过去，窄一点就赖在原地不动
                     gap = TaskbarFreeSpace.FindBestGap(
                         trayHwnd, _hwnd, (int)Math.Round(wantDip * dpi), (int)Math.Round(minDip * dpi),
-                        CurrentTrayX(trayHwnd), Cfg.AutoSide);
+                        (int)Math.Round(GapStickDip * dpi), _autoGapSide == Cfg.AutoSide ? _autoGap : null, Cfg.AutoSide);
                 else
                     // 窗口藏着（没在放歌、全屏隐藏）时没人看空档，让后台停止枚举，别白漏 UIA 内存。
                     // 不走 FindBestGap（它会把目标设回来）；重新显示后下一次 Dock 设回目标，
                     // SetTargets 发现目标变了会自己 Nudge 立刻重测。_autoGap 保留，显示时先按旧空档摆
                     TaskbarFreeSpace.SetTargets(IntPtr.Zero, IntPtr.Zero);
-                if (gap.HasValue) _autoGap = gap.Value; // 失败则沿用旧空档，不回退跳位
+                if (gap.HasValue) (_autoGap, _autoGapSide) = (gap.Value, Cfg.AutoSide); // 失败则沿用旧空档，不回退跳位
                 if (_autoGap.HasValue)
                 {
                     var g = _autoGap.Value;
                     var gapDip = (g.R - g.L - GapPad * 2) / dpi; // 两侧各留一份间距，不与图标贴边
                     // 空档装不下「封面 + 底线宽度的文字」时就把封面收掉：
-                    // 封面没了还认得出在放哪首歌，歌词被切成两个字就真没意义了
-                    if (showCover && gapDip - coverZone - buttonsZone < MinContentDip)
+                    // 封面没了还认得出在放哪首歌，歌词被切成两个字就真没意义了。
+                    // 悬停时的按钮区不算在内：悬停显示的是歌名歌手（放不下有省略号），
+                    // 为了腾按钮位置把封面收掉，鼠标一放上去封面就没了，内容还跟着往左跳一下
+                    if (showCover && gapDip - coverZone < MinContentDip)
                     {
                         showCover = false;
                         coverZone = 0;
-                        wantDip = Cfg.Width + buttonsZone;
+                        wantDip = Cfg.Width;
                     }
-                    var want = Math.Min(gapDip, wantDip);
+                    var rest = Math.Min(gapDip, wantDip);
+                    if (rest < 40) rest = Math.Max(24, gapDip);
+                    lyricsW = Math.Max(24, rest - coverZone);
+                    var want = Math.Min(gapDip, wantDip + buttonsZone);
                     if (want < 40) want = Math.Max(24, gapDip);
                     contentW = Math.Max(24, want - coverZone - buttonsZone);
                     targetWidth = contentW + coverZone + buttonsZone;
@@ -939,27 +1050,33 @@ public partial class OverlayWindow : Window
         CoverZone.Visibility = showCover ? Visibility.Visible : Visibility.Collapsed;
         CoverZone.Width = Math.Max(0, heightDip - 12);  // 显式指定宽高 + 垂直居中
         CoverZone.Height = Math.Max(0, heightDip - 12);
-        BodyGrid.Margin = new Thickness(coverZone, 0, 0, 0);
-        ButtonsHost.Width = _showingButtons ? ButtonsWidth : 0;
+        ButtonsPanel.Margin = new Thickness(coverZone, 0, 0, 0);
+        LinesHost.Margin = new Thickness(coverZone, 0, 0, 0);
+        LinesHost.Width = lyricsW;
+        // 信息层只在显示时才改排版：收起悬停时它正在淡出，这时换宽度，
+        // 被省略号截短的歌名会在淡出途中突然冒出后半截。
+        // 它和歌词层一样从封面右缘排起，悬停让出的按钮位靠平移补（见 UpdateDisplayMode）：
+        // 窗口在这里改尺寸时会当场同步渲染一帧，排版要是跟着悬停变，字会先闪到终点再被动画拉回去
+        if (_showingInfo)
+        {
+            InfoPanel.Margin = new Thickness(coverZone, 0, 0, 0);
+            InfoPanel.Width = contentW;
+        }
 
+        // 显示层切换动画还没走完时先不收窄（见 UpdateDisplayMode）
+        targetWidth = Math.Max(targetWidth, _holdWidthDip);
         _displayWidthDip = targetWidth;
         Width = targetWidth;
         FloatBg.Visibility = Cfg.Mode == "taskbar" ? Visibility.Collapsed : Visibility.Visible;
         // 悬停遮罩只包实际内容（封面+按钮+当前显示的文字）：窗口为防甩动会保留
         // 歌词宽度（长歌词时=最大宽度），遮罩若按窗口铺会显得比文字宽一截；
-        // 居中对齐时文字在加宽内容区里居中，遮罩要加上这段偏移
-        var displayedW = _showingInfo ? _infoWidthDip : _lyricsWidthDip;
-        var textOffset = IsLeftAlign ? 0 : Math.Max(0, (contentW - displayedW) / 2);
+        // 居中对齐时文字在加宽内容区里居中，遮罩要加上这段偏移。
+        // 文字宽度不超过所在层：空档挤的时候歌名是带省略号截短显示的，遮罩不能伸出窗口
+        var layerW = _showingInfo ? contentW : lyricsW;
+        var displayedW = Math.Min(layerW, _showingInfo ? _infoWidthDip : _lyricsWidthDip);
+        var textOffset = IsLeftAlign ? 0 : (layerW - displayedW) / 2;
         HoverMask.Width = Math.Max(24, coverZone + buttonsZone + textOffset + displayedW - 4);
         ApplyPosition(assertZOrder);
-    }
-
-    /// <summary>窗口当前在任务栏 client 坐标系里的 x（自动避让就近选档用）。</summary>
-    private int CurrentTrayX(IntPtr trayHwnd)
-    {
-        NativeMethods.GetWindowRect(_hwnd, out var wrc);
-        NativeMethods.GetWindowRect(trayHwnd, out var trc);
-        return wrc.Left - trc.Left;
     }
 
     /// <summary>按 _displayWidthDip 摆放窗口位置（任务栏挂靠或浮动）。</summary>

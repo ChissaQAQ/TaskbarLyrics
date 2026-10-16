@@ -1,6 +1,6 @@
 // 任务栏空档计算（自动避让功能）：
 // 用 UIA 枚举任务栏上的元素矩形（开始/搜索/任务视图/应用图标/时钟等），
-// 合并成占用区间后求水平空档；选择能放下窗口且离当前位置最近的空档。
+// 合并成占用区间后求水平空档，在设置的那半边里挑一个摆窗口（见 PickGap）。
 //
 // UIA 枚举跑在专用后台线程上，UI 线程只读它算好的快照。
 // 这一条是硬性要求，不是优化：AutomationElement 的每次属性读取都是同步跨进程
@@ -52,6 +52,9 @@ public static class TaskbarFreeSpace
     private const int StuckConfirms = 3;
 
     private static volatile Snapshot? _snap;
+    // 上一轮测到的占用（取并集之前的原样结果），和这一轮并起来才发布，见 Measure。
+    // 只有工作线程读写；键（任务栏、自身窗口、任务栏宽度）对不上就不并
+    private static ((IntPtr Tray, IntPtr Exclude, int Width) Key, List<(int L, int R)>? Occupied) _lastMeasured;
     private static volatile bool _stop;
     private static volatile int _idleMs = FastRefreshMs;
     private static int _started;
@@ -138,6 +141,9 @@ public static class TaskbarFreeSpace
             Volatile.Write(ref _beatMs, Environment.TickCount64);
             Wake.Reset(); // 先清再测：测量期间到来的变化会让下面的 Wait 立刻返回
             var tray = _wantTray;
+            // 停测期间（窗口藏着、关了自动避让）任务栏怎么变都没人看着，上一轮的结果等恢复时
+            // 已经不知道多旧了，不能再拿来和新一轮取并集（见 Measure）
+            if (tray == IntPtr.Zero && myGen == _gen) _lastMeasured = default;
             if (tray != IntPtr.Zero)
             {
                 var ok = false;
@@ -171,32 +177,49 @@ public static class TaskbarFreeSpace
         Collect(AutomationElement.FromHandle(tray), rc.Right, wrc.Left,
             unchecked((int)exclude.ToInt64()), IsXamlTaskbar(tray), raw);
         if (raw.Count == 0) return false; // 查询没结果时不覆盖上一份成功的快照
+        var merged = Merge(raw);
 
-        raw.Sort((a, b) => a.L.CompareTo(b.L));
+        // 发布的是这一轮和上一轮的并集：腾出来的地方要连着两轮都测到空才算空，占上的地方立刻算占。
+        // UIA 出错只会漏报（单个元素瞬断就跳过，见 Collect），不会凭空多出元素——
+        // 任务栏正在变化时漏掉开始按钮或一截图标，那一轮就冒出一个假的大空档，
+        // 窗口被引过去、下一轮又回来，这是「任务栏一变就横跳」的另一个来源。
+        // 真腾出来的地方晚一轮（约 1 秒）才用上，代价只是窗口晚点变宽，不会压到图标
+        var last = _lastMeasured;
+        var key = (tray, exclude, rc.Right);
+        var settled = last.Occupied != null && last.Key == key && Same(last.Occupied, merged);
+        var shown = last.Occupied != null && last.Key == key ? Merge(last.Occupied.Concat(merged)) : merged;
+        if (myGen == _gen) _lastMeasured = (key, merged);
+
+        // 结果和上一轮完全一致 → 任务栏静止，周期翻倍（详见上面 FastRefreshMs 处的说明）。
+        // 快照本身不必重新发布，省掉调用方那边无意义的引用变更
+        var prev = _snap;
+        if (prev != null && prev.Tray == tray && prev.TrayWidth == rc.Right
+            && Same(prev.Occupied, shown))
+        {
+            // 测到的变了、只是被并集挡着没发布：照快节奏再测一轮，确认是真腾出来了还是一时漏报
+            _idleMs = settled ? Math.Min(MaxRefreshMs, _idleMs * 2) : FastRefreshMs;
+            MarkOk(myGen);
+            return true;
+        }
+        if (myGen != _gen) return false; // 挂了很久才返回的旧线程，不许拿过期结果覆盖接手线程的快照
+        _idleMs = FastRefreshMs; // 有变化：回到快节奏，紧跟后续的连续变化
+        _snap = new Snapshot { Tray = tray, TrayWidth = rc.Right, Occupied = shown };
+        MarkOk(myGen);
+        return true;
+    }
+
+    /// <summary>按左端排序后把相接、相叠（间隔 2px 以内）的区间合并成占用区。</summary>
+    private static List<(int L, int R)> Merge(IEnumerable<(int L, int R)> raw)
+    {
         var merged = new List<(int L, int R)>();
-        foreach (var (l, r) in raw)
+        foreach (var (l, r) in raw.OrderBy(x => x.L))
         {
             if (merged.Count > 0 && l <= merged[^1].R + 2)
                 merged[^1] = (merged[^1].L, Math.Max(merged[^1].R, r));
             else
                 merged.Add((l, r));
         }
-
-        // 结果和上一轮完全一致 → 任务栏静止，周期翻倍（详见上面 FastRefreshMs 处的说明）。
-        // 快照本身不必重新发布，省掉调用方那边无意义的引用变更
-        var prev = _snap;
-        if (prev != null && prev.Tray == tray && prev.TrayWidth == rc.Right
-            && Same(prev.Occupied, merged))
-        {
-            _idleMs = Math.Min(MaxRefreshMs, _idleMs * 2);
-            MarkOk(myGen);
-            return true;
-        }
-        if (myGen != _gen) return false; // 挂了很久才返回的旧线程，不许拿过期结果覆盖接手线程的快照
-        _idleMs = FastRefreshMs; // 有变化：回到快节奏，紧跟后续的连续变化
-        _snap = new Snapshot { Tray = tray, TrayWidth = rc.Right, Occupied = merged };
-        MarkOk(myGen);
-        return true;
+        return merged;
     }
 
     /// <summary>记下「这一轮真的拿到了结果」。静止期不发布新快照，所以快照自身的新鲜度
@@ -394,76 +417,89 @@ public static class TaskbarFreeSpace
 
     // 空档窄到这个数以下（client 像素）摆什么都是一团糊，宁可不认这个空档，
     // 让调用方沿用上次的位置
-    private const int MinGapWidth = 60;    // 对面半边比指定半边宽出这么多才值得跨过去（约 3 个 12pt 汉字）。
-    // 不设门槛的话两边宽度稍有变化窗口就来回搬家
-    private const int CrossSideMargin = 40;
+    private const int MinGapWidth = 60;
 
-    /// <summary>在任务栏上找最合适的空档（client 像素坐标）。纯计算，只读后台快照。
-    /// wantWidth：窗口期望宽度（自然宽度，非收缩后）；minWidth：还能好好显示的最小宽度；
-    /// currentX：窗口当前 x；preferSide：left | right，优先待在哪半边。
+    /// <summary>在任务栏上找最合适的空档（client 像素坐标）。只读后台快照，选档本身见 <see cref="PickGap"/>。
     /// 快照还没就绪（启动头一秒）或任务栏已换（explorer 重启）时返回 null，
     /// 调用方回退默认摆放。</summary>
     public static (int L, int R)? FindBestGap(IntPtr trayHwnd, IntPtr excludeHwnd,
-        int wantWidth, int minWidth, int currentX, string preferSide)
+        int wantWidth, int minWidth, int stickWidth, (int L, int R)? current, string preferSide)
     {
         SetTargets(trayHwnd, excludeHwnd);
         Watchdog();
         var snap = _snap;
         if (snap == null || snap.Tray != trayHwnd || snap.TrayWidth <= 0) return null;
-        var occ = snap.Occupied;
-        if (occ.Count == 0) return null;
+        if (snap.Occupied.Count == 0) return null;
+        return PickGap(snap.Occupied, snap.TrayWidth, wantWidth, minWidth, stickWidth, current, preferSide);
+    }
 
-        var trayRight = snap.TrayWidth;
+    /// <summary>纯计算：按占用区间选空档。
+    /// wantWidth：窗口期望宽度（自然宽度，非收缩后）；minWidth：还能好好显示的最小宽度；
+    /// stickWidth：当前空档的黏性加成；current：上次选中的空档（没有为 null）；
+    /// preferSide：left | right，待在哪半边（硬约束，只有这半边被占满才去对面）。</summary>
+    internal static (int L, int R)? PickGap(List<(int L, int R)> occ, int trayRight,
+        int wantWidth, int minWidth, int stickWidth, (int L, int R)? current, string preferSide)
+    {
         var gaps = new List<(int L, int R)>();
-        var cur = 0;
+        var edge = 0;
         foreach (var (l, r) in occ)
         {
-            if (l > cur) gaps.Add((cur, l));
-            cur = Math.Max(cur, r);
+            if (l > edge) gaps.Add((edge, l));
+            edge = Math.Max(edge, r);
         }
-        if (trayRight > cur) gaps.Add((cur, trayRight));
+        if (trayRight > edge) gaps.Add((edge, trayRight));
+
+        // 窗口眼下待的空档：跟上次选中的那个重叠最多的。图标增减时空档整体平移、
+        // 宽度微调，按重叠认才认得出「还是原来那个」
+        (int L, int R)? cur = null;
+        if (current is { } p)
+        {
+            var bestOverlap = 0;
+            foreach (var g in gaps)
+            {
+                var overlap = Math.Min(g.R, p.R) - Math.Max(g.L, p.L);
+                if (overlap > bestOverlap) { bestOverlap = overlap; cur = g; }
+            }
+        }
+        // 以下所有宽度比较都按这个算：当前空档白送 stickWidth。
+        // 原先选档完全不记得窗口在哪，每次从零挑，图标多、空间紧的时候几个空档的宽度都卡在
+        // 阈值附近——小组件轮播换了段文字、开关一个应用让居中图标左右各挪半格，选择就翻过去，
+        // 下一次变回来又翻回来，窗口在两个空档之间来回横跳。
+        // 白送一截之后，离开当前空档要等它真缩下去这么多、或者别处真宽出这么多
+        int Width((int L, int R) g) => g.R - g.L + (g == cur ? stickWidth : 0);
 
         var half = trayRight / 2.0;
         var halfCenter = preferSide == "left" ? trayRight / 4.0 : trayRight * 3.0 / 4.0;
-        bool InSide((int L, int R) g) =>
-            preferSide == "left" ? (g.L + g.R) / 2.0 < half : (g.L + g.R) / 2.0 >= half;
+        // 伸进这半边就算这半边的。原先按空档中心归边：图标靠左排、后面只剩一个横跨中线的
+        // 大空档时，图标一多它的中心就越过中线，指定左边的人这半边凭空一个空档都没了
+        bool InSide((int L, int R) g) => preferSide == "left" ? g.L < half : g.R > half;
 
-        // 放得下的空档：优先指定半边（取离该半边中心最近的），都没有再全局就近
-        var fitting = gaps.Where(g => g.R - g.L >= wantWidth).ToList();
-        var inSide = fitting.Where(InSide).ToList();
-        if (inSide.Count > 0)
-            return inSide.OrderBy(g => Math.Abs((g.L + g.R) / 2.0 - halfCenter)).First();
+        // 停靠侧是硬约束：这半边还有能用的空档就只在这半边里挑，放不满就缩着放，
+        // 不会因为对面放得下就搬过去。原先放不满时会跨到对面能放满的空档，可图标居中时
+        // 两边空档的宽度都卡在窗口宽度附近：小组件换一段文字、UIA 某一轮漏报一个元素，
+        // 对面就「放得下」了，窗口跳过去，下一轮变回来又跳回来，这就是左右横跳。
+        // 代价是这半边窄的时候只能缩着放（长句靠滚动看全），总比窗口来回搬家好受。
+        // 只有这半边被图标占满、连一条能用的缝都没有时才去对面，不然窗口就压在图标上了；
+        // 去了对面要等这半边重新空出最小可读宽度才回来，宽度卡在门槛上下抖也不会来回搬
+        var homeMin = cur is { } away && !InSide(away) ? Math.Max(minWidth, MinGapWidth) : MinGapWidth;
+        var side = gaps.Where(g => InSide(g) && g.R - g.L > homeMin).ToList();
+        if (side.Count == 0) return Widest(gaps);
+
+        // 放得下的：当前所在的那个，否则离这半边中心最近的
+        var fitting = side.Where(g => Width(g) >= wantWidth).ToList();
+        if (cur is { } c && fitting.Contains(c)) return c;
         if (fitting.Count > 0)
-        {
-            var center = currentX + wantWidth / 2.0;
-            return fitting.OrderBy(g => Math.Abs((g.L + g.R) / 2.0 - center)).First();
-        }
+            return fitting.OrderBy(g => Math.Abs((g.L + g.R) / 2.0 - halfCenter)).First();
+        // 都放不满：取最宽的缩着放（当前空档带黏性）。反正要缩，能多一个字是一个字
+        return Widest(side);
 
-        // 装不满：退一步找装得下「最小可读宽度」的，仍然优先指定半边。
-        // 这一档取最宽而不是取就近——反正要缩，能多一个字是一个字
-        var usable = gaps.Where(g => g.R - g.L >= minWidth).ToList();
-        var usableInSide = Widest(usable.Where(InSide));
-        if (usableInSide != null) return usableInSide;
-        var usableAny = Widest(usable);
-        if (usableAny != null) return usableAny;
-
-        // 连最小可读都装不下：这时候侧向偏好是软的。原先它是硬约束——
-        // 指定半边只要有一条缝就往里挤，哪怕对面宽出一大截。实测过一次
-        // 右半边只有 255px、左半边有 337px，窗口硬挤在右边缩到 247px，
-        // 长歌名当场被切掉，看着像被旁边的图标压住了
-        var sideBest = Widest(gaps.Where(InSide));
-        var anyBest = Widest(gaps);
-        if (sideBest == null) return anyBest;
-        if (anyBest == null) return sideBest;
-        return anyBest.Value.R - anyBest.Value.L >= sideBest.Value.R - sideBest.Value.L + CrossSideMargin
-            ? anyBest : sideBest;
-
-        static (int L, int R)? Widest(IEnumerable<(int L, int R)> pool)
+        (int L, int R)? Widest(IEnumerable<(int L, int R)> pool)
         {
             (int L, int R)? best = null;
-            var bestW = MinGapWidth;
+            var bestW = 0;
+            // 「窄到不认」看的是真实宽度，黏性加成不算：一条缝不会因为窗口正待在里面就变得能用
             foreach (var g in pool)
-                if (g.R - g.L > bestW) { bestW = g.R - g.L; best = g; }
+                if (g.R - g.L > MinGapWidth && Width(g) > bestW) { bestW = Width(g); best = g; }
             return best;
         }
     }

@@ -3,6 +3,7 @@
 //       TaskbarLyrics.exe --settings     只打开设置窗口（不启动歌词覆盖层）
 //       TaskbarLyrics.exe --lyrics-test "歌名" "歌手" [translation|romaji|off] [时长秒]   控制台验证歌词抓取
 //       TaskbarLyrics.exe --update-test                                        控制台验证检查更新与配额
+//       TaskbarLyrics.exe --stats-test [report | shot <目录> [real]]           控制台自测听歌统计
 using System.Runtime.InteropServices;
 using System.Windows;
 
@@ -22,7 +23,7 @@ public partial class App : Application
     private MainController? _controller;
 
     // Local\ 前缀按用户会话隔离：快速切换用户、远程桌面的另一个会话有自己的任务栏，各跑一份才对
-    private const string InstanceMutexName = @"Local\TaskbarLyrics.SingleInstance";
+    internal const string InstanceMutexName = @"Local\TaskbarLyrics.SingleInstance";
 
     /// <summary>单实例锁。必须放 static 字段里持有到进程退出：只放局部变量的话，
     /// Mutex 对象被 GC 回收时句柄随之关闭，锁就悄悄没了。</summary>
@@ -108,6 +109,24 @@ public partial class App : Application
             return;
         }
 
+        // 听歌统计自测：TaskbarLyrics.exe --stats-test（详见 StatsSelfTest 文件头）
+        if (e.Args.Length >= 1 && e.Args[0] == "--stats-test")
+        {
+            AttachConsole(-1);
+            Console.OutputEncoding = System.Text.Encoding.UTF8;
+            if (e.Args.Length >= 2 && e.Args[1] == "shot")
+            {
+                // 截图要真渲染：保留同步上下文，排进消息循环一步步截，截完由它自己 Shutdown
+                StatsSelfTest.Shot(e.Args.Skip(2).ToArray());
+                return;
+            }
+            System.Threading.SynchronizationContext.SetSynchronizationContext(null);
+            var code = 1;
+            try { code = StatsSelfTest.Run(e.Args.Skip(1).ToArray()); }
+            finally { Shutdown(code); } // 同 --apply-update：抛出去也得退
+            return;
+        }
+
         // 只开设置窗口：TaskbarLyrics.exe --settings
         if (e.Args.Length >= 1 && e.Args[0] == "--settings")
         {
@@ -161,6 +180,13 @@ public partial class App : Application
             Log.Error("task", args.Exception);
             args.SetObserved();
         };
+    }
+
+    /// <summary>关机、注销：WPF 随后的 Shutdown 不保证轮得到 OnExit，手里的听歌片段先落盘。</summary>
+    protected override void OnSessionEnding(SessionEndingCancelEventArgs e)
+    {
+        _controller?.FlushStats();
+        base.OnSessionEnding(e);
     }
 
     protected override void OnExit(ExitEventArgs e)

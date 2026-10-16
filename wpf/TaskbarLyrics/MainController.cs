@@ -5,6 +5,7 @@ using System.IO;
 using System.Net.Http;
 using System.Threading;
 using System.Windows;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
@@ -30,6 +31,9 @@ public sealed class MainController : IDisposable
     // （实测 Position/EndTime 恒为 0、LastUpdatedTime 停在 1601 年），单曲循环检测
     // 只能靠这个补位。volatile int 而非 double：C# 不允许 volatile double
     private volatile int _fetchedDurMs;
+    // 同一份抓取结果给听歌统计的那份（时长、曲库 id、专辑），与 _fetchedDurMs 同生同灭；
+    // 整个对象一次换掉，统计那边读不到时长是新的、id 还是旧的这种半截状态
+    private volatile LyricsMatch? _fetchedMatch;
     private double? _retryAt;
     private int _retryCount;
     // 这首歌当前上屏结果的排名（见 RankOf），-1 表示这首歌还没有抓取落地过。
@@ -45,6 +49,14 @@ public sealed class MainController : IDisposable
     private double? _pausedSince;  // 暂停起始时刻（超时后改显歌曲信息）
     private double? _nullSince;    // SMTC 会话消失起始时刻（防抖：瞬断不隐藏窗口）
     private int _fetchVersion;   // 防止过期歌词回写
+    // 「仅这首歌」的临时偏移：叠加在全局偏移上，不存盘，换了歌就回正（见 SongOffsetFor）。
+    // 认歌用播放状态的 Key（歌名｜歌手）而不是 _songKey：改设置、清缓存重抓歌词时
+    // _songKey 会被清空，借用它的话没切歌也会把临时偏移清掉。
+    // 还要连同来源一起记：自动选源时，用户的播放器一暂停，显示就可能被另一个停在别的歌上的
+    // 播放器（常见的是开着没关的网易云）顶走，只比 Key 会把它当成切歌，继续播放时偏移已经没了。只在 UI 线程读写
+    private int _songOffsetMs;
+    private string _songOffsetKey = "";
+    private string _songOffsetSource = "";
 
     // 当前正在显示的行（用于变化检测与设置即时生效重建）
     private string _shownOriginal = "\u0001"; // 初值保证首帧必刷新
@@ -124,6 +136,10 @@ public sealed class MainController : IDisposable
         HookOverlay(_overlay);
         _overlay.Show();
         _tray = new TrayIcon(this);
+        // 首次运行再用托盘通知交代一句：正在放歌的话歌词条直接出歌词，看不到下面那段占位引导；
+        // 托盘图标在 Win11 上默认收在 ^ 里，不说的话新用户找不到菜单和设置。
+        // 通知会进通知中心，错过了也找得回来
+        if (Cfg.ShowGuide) _tray.ShowTip(GuideBalloon);
         // 自启路径自愈：exe 挪位置后注册表里的旧路径会静默失效，启动时幂等刷新
         try { if (Autostart.IsEnabled()) Autostart.SetEnabled(true); }
         catch (SystemException) { /* 注册表写失败不致命 */ }
@@ -157,6 +173,7 @@ public sealed class MainController : IDisposable
             }
             Overlay.Dock();
             Overlay.UpdateFullscreen();
+            Overlay.EnsureVisibility();
             // 顺带盯一眼系统主题：Windows 换深浅色（含日落自动切换）时不给普通窗口
             // 发任何我们收得到的通知，只能轮询。读一个注册表值的开销远小于这轮已经做的
             // 任务栏贴合，1.5 秒的延迟用户也察觉不到
@@ -164,6 +181,9 @@ public sealed class MainController : IDisposable
         };
         _dockTimer.Start();
 
+        // 听歌记录挂在 SMTC 回调上，得在开始轮询之前就位
+        _stats = new ListenRecorder(() => StatsStore.DefaultDir);
+        _art = new ArtCollector(() => Cfg.StatsEnabled && Cfg.StatsImages);
         var token = _cts.Token;
         Task.Run(() => SmtcListener.PollAsync(OnState, token,
             () => Cfg.PlayerSource, () => Cfg.PlayerBlocklist), token);
@@ -177,6 +197,8 @@ public sealed class MainController : IDisposable
         if (state == null || state.Title.Length == 0)
         {
             _state = null;
+            _stats?.Observe(null, null);
+            _art?.Observe(null, null);
             return;
         }
         _state = state;
@@ -215,12 +237,18 @@ public sealed class MainController : IDisposable
                     _lines = null;
                     _karaoke = new Dictionary<int, List<KaraokeWord>>();
                     _fetchedDurMs = 0; // 上一首的时长不能用来判新歌的重播
+                    _fetchedMatch = null;
                 }
                 _songKey = state.Key;
                 _retryAt = null;
                 FetchLyrics(state);
             }
         }
+
+        // 放在切歌复位之后：先清掉上一首的时长，才不会拿它去算新歌的播放次数。
+        // 记录关掉时喂 null，正在累计的那段就地落盘，之后不再记
+        _stats?.Observe(Cfg.StatsEnabled ? state : null, _fetchedMatch);
+        _art?.Observe(state, _fetchedMatch);
     }
 
     // 抓取结果的好坏排名：无歌词 0 < 歌手对不上的备胎（可能是同名翻唱）1 < 备选源（QQ/LRCLIB，没有译文）2
@@ -239,6 +267,7 @@ public sealed class MainController : IDisposable
     {
         var version = Interlocked.Increment(ref _fetchVersion);
         var (title, artist, durationS) = (state.Title, state.Artist, state.DurationS);
+        var key = state.Key;
         var withKaraoke = Cfg.Karaoke;
         var secondLine = Cfg.SecondLine;
         Task.Run(async () =>
@@ -266,6 +295,8 @@ public sealed class MainController : IDisposable
                     _lines = r.Lines;
                     _karaoke = r.Karaoke;
                     _fetchedDurMs = (int)(r.SongDurationS * 1000);
+                    _fetchedMatch = new LyricsMatch(key, r.SongDurationS, r.MatchId, r.MatchAlbum,
+                        r.MatchCover, r.MatchArtists);
                 }
                 // 还没拿到网易云的完整结果就再试。例外是网易云正常答复了「没有这首歌」、
                 // 而备选源已经有歌词在显示（比如只在 QQ 上架的歌）：再试也只会拿回同样的结果，
@@ -296,14 +327,20 @@ public sealed class MainController : IDisposable
             // 实测ヘクとパスカル「fish in the pool」的封面是一张淡蓝色插画，缩到 8x8
             // 后灰度均值 192、标准差 7.2，前两道闸全中，被当成占位图扔了；而白占位图是
             // 纯灰的（色度 2.9），这张有 59.9
-            var (stddev, mean, chroma) = CoverStats(img);
-            if (!(stddev < 8 && mean > 180 && chroma < 12)) cover = img;
+            if (!IsPlaceholderCover(img)) cover = img;
         }
         catch
         {
             cover = null;
         }
         Live?.SetCover(cover); // null 时显示音符占位，不再留空白
+    }
+
+    /// <summary>网易云无封面时给的白占位图（判据见 DecodeAndSetCover）。听歌统计存封面时也用它把关。</summary>
+    internal static bool IsPlaceholderCover(BitmapSource img)
+    {
+        var (stddev, mean, chroma) = CoverStats(img);
+        return stddev < 8 && mean > 180 && chroma < 12;
     }
 
     /// <summary>缩放到 8x8 算灰度的 (标准差, 均值)（对应 PIL 的 ImageStat），
@@ -334,10 +371,36 @@ public sealed class MainController : IDisposable
 
     // ---- 歌词节拍（UI 线程 50ms）----
 
+    // 新手引导的文案（见 AppConfig.ShowGuide）。占位引导第二行用的是译文字号，
+    // 空档窄时会被截成省略号：要紧的话放前面，「右键」那半句托盘通知里还会再说一遍
+    private const string GuideTitle = "任务栏歌词已就绪";
+    private const string GuideHint = "播放音乐后歌词显示在这里，右键打开菜单";
+    private const string GuideBalloon =
+        "已在后台运行。播放音乐后歌词会显示在任务栏上；右键歌词或托盘图标"
+        + "（可能收在任务栏右下角的 ^ 里）可以切换模式、打开设置。";
+
+    /// <summary>新手引导到此为止：放出了第一首歌，或者用户已经自己用过右键菜单。</summary>
+    public void EndGuide()
+    {
+        if (!Cfg.ShowGuide) return;
+        Cfg.ShowGuide = false;
+        SaveCfg();
+    }
+
     private void OnLyricsTick()
     {
-        if (Live == null) return; // 窗口正在重建（explorer 重启），本轮没有可刷的界面
         var state = _state;
+        // 挂临时偏移的那个播放器换了歌，上一首的偏移作废。必须真清掉而不是只靠 SongOffsetFor 比对：
+        // 切走再切回来（A→B→A）时那份旧偏移会原样复活。单曲循环、暂停后继续都还是同一首，不受影响。
+        // 放在 Live 判空之前：explorer 重启、覆盖层重建不出来的那段空窗里照样会切歌
+        if (state != null && _songOffsetKey.Length > 0
+            && state.SourceId == _songOffsetSource && state.Key != _songOffsetKey)
+        {
+            _songOffsetKey = "";
+            _songOffsetSource = "";
+            _songOffsetMs = 0;
+        }
+        if (Live == null) return; // 窗口正在重建（explorer 重启），本轮没有可刷的界面
         if (state == null)
         {
             // SMTC 会话瞬断（几秒内恢复）不闪藏窗口；消失超过 2s 才清空隐藏
@@ -345,8 +408,18 @@ public sealed class MainController : IDisposable
             if (Clock.Now - _nullSince.Value > 2.0)
             {
                 _pausedSince = null;
-                Overlay.SetInfoMode(false);
-                Overlay.SetMedia("", "");
+                if (Cfg.ShowGuide)
+                {
+                    // 首次运行还没放过歌：歌词条不藏起来，就在它以后出现的位置上说明怎么用。
+                    // 不然新用户启动后什么也看不见，不知道程序起来了没有、该干什么
+                    Overlay.SetMedia(GuideTitle, GuideHint);
+                    Overlay.SetInfoMode(true);
+                }
+                else
+                {
+                    Overlay.SetInfoMode(false);
+                    Overlay.SetMedia("", "");
+                }
                 if (_shownOriginal != "")
                 {
                     _shownOriginal = "";
@@ -357,6 +430,7 @@ public sealed class MainController : IDisposable
             return;
         }
         _nullSince = null;
+        EndGuide(); // 放出了第一首歌，引导完成（占位引导下一行就被歌曲信息顶掉）
 
         // 暂停计时：超时后改显歌曲信息（悬停时由覆盖层自行切换）
         if (state.Playing) _pausedSince = null;
@@ -372,7 +446,8 @@ public sealed class MainController : IDisposable
         var lines = _lines;
         if (lines is { Count: > 0 })
         {
-            var posMs = Math.Max(0, (int)(state.CurrentPositionS() * 1000) + Cfg.OffsetMs);
+            var offsetMs = Cfg.OffsetMs + SongOffsetFor(state);
+            var posMs = Math.Max(0, (int)(state.CurrentPositionS() * 1000) + offsetMs);
             // 单曲循环检测：插值进度超过歌曲时长 → 判定为重播，计时归位。
             // 必须用未截断进度：截断进度永不超过 DurationS，
             // 长尾奏（>20s）歌曲会在第一次播放的尾奏里被误判成重播
@@ -405,7 +480,7 @@ public sealed class MainController : IDisposable
                 var overMs = assumedEndMs > 0 ? unclampedMs % assumedEndMs : 0;
                 state.BasePositionS = overMs / 1000.0;
                 state.BaseTime = Clock.Now;
-                posMs = Math.Max(0, overMs + Cfg.OffsetMs);
+                posMs = Math.Max(0, overMs + offsetMs);
             }
             var (index, orig, trans) = Lyrics.CurrentLine(lines, posMs);
             if (index < 0)
@@ -520,12 +595,55 @@ public sealed class MainController : IDisposable
     // 菜单能调到设置页校验不接受的值，会变成「一打开设置就报错、不改都存不了」
     private const int MaxOffsetMs = 3000;
 
-    /// <summary>当前偏移的菜单文案。正值＝歌词提前（posMs 加得多，查到更靠后的行）。</summary>
-    public string OffsetLabel() =>
-        Cfg.OffsetMs == 0 ? "当前无偏移" : $"当前 {Cfg.OffsetMs / 1000.0:+0.0;-0.0}s";
+    /// <summary>当前偏移的菜单文案。正值＝歌词提前（posMs 加得多，查到更靠后的行）。
+    /// 全局和本首分开写：只给一个合计数，用户分不清回正之后会剩多少</summary>
+    public string OffsetLabel()
+    {
+        static string Fmt(int ms) => $"{ms / 1000.0:+0.0;-0.0}s";
+        var song = SongOffsetFor(_state);
+        if (Cfg.OffsetMs == 0 && song == 0) return "当前无偏移";
+        if (song == 0) return $"全局 {Fmt(Cfg.OffsetMs)}";
+        if (Cfg.OffsetMs == 0) return $"本首 {Fmt(song)}";
+        return $"全局 {Fmt(Cfg.OffsetMs)} · 本首 {Fmt(song)}";
+    }
 
     /// <summary>菜单快调歌词偏移（deltaMs 正数＝更提前）。到边界就停在边界。</summary>
     public void NudgeOffset(int deltaMs) => SetOffset(Cfg.OffsetMs + deltaMs);
+
+    /// <summary>眼下有没有一首歌可以挂临时偏移（菜单据此把「仅这首歌」几项置灰）。</summary>
+    public bool HasSong => _state != null;
+
+    /// <summary>s 这首歌身上的临时偏移。挂的不是它（刚切歌还没轮到下一拍清掉、显示被别的播放器
+    /// 临时顶走），或压根没有播放会话，都按 0 算——菜单文案不会对着一首没在放的歌报「本首 -1.0s」。
+    /// 调用方传自己手里那份 _state 快照，别在这里另读：SMTC 线程随时会换掉它，
+    /// 同一拍里前后读到两首歌，就会拿这首的进度配上那首的偏移</summary>
+    private int SongOffsetFor(PlaybackState? s) =>
+        s != null && s.SourceId == _songOffsetSource && s.Key == _songOffsetKey ? _songOffsetMs : 0;
+
+    /// <summary>菜单快调「仅这首歌」的偏移，方向同 <see cref="NudgeOffset"/>。</summary>
+    public void NudgeSongOffset(int deltaMs)
+    {
+        // 没在放歌，「这首」无从说起（菜单里这几项也是灰的）
+        if (_state is { } s) SetSongOffset(s, SongOffsetFor(s) + deltaMs);
+    }
+
+    public void ResetSongOffset()
+    {
+        if (_state is { } s) SetSongOffset(s, 0);
+    }
+
+    /// <summary>设当前这首歌的临时偏移。不存盘：它本来就只活到切歌，
+    /// 重启程序后也该从全局偏移重新开始。范围单独夹在 ±3s，跟全局叠起来最多 ±6s</summary>
+    private void SetSongOffset(PlaybackState state, int ms)
+    {
+        var clamped = Math.Clamp(ms, -MaxOffsetMs, MaxOffsetMs);
+        if (clamped == SongOffsetFor(state)) return;
+        _songOffsetMs = clamped;
+        _songOffsetKey = clamped == 0 ? "" : state.Key;
+        _songOffsetSource = clamped == 0 ? "" : state.SourceId;
+        _forceLine = true;
+        OnLyricsTick();
+    }
 
     public void SetOffset(int ms)
     {
@@ -713,6 +831,101 @@ public sealed class MainController : IDisposable
         win.ShowDialog();
     }
 
+    // ---- 听歌统计 ----
+
+    private ListenRecorder? _stats; // --settings 模式下没有记录器，统计直接读盘
+    private ArtCollector? _art;     // 同上，--settings 模式下不存图
+    private StatsWindow? _statsWin;
+
+    /// <summary>关机、注销时把手里的片段落盘（App.OnSessionEnding 调用）。</summary>
+    public void FlushStats() => _stats?.Flush();
+
+    /// <summary>统计窗口要的全量片段，在后台线程调用。</summary>
+    internal List<ListenSegment> LoadStatsSegments()
+        => _stats?.Snapshot(StatsStore.AllDirs) ?? StatsStore.ReadAll(StatsStore.AllDirs);
+
+    /// <summary>--settings 单开、主程序同时在跑：记录器在主程序手里，这边删了文件，
+    /// 它之后落盘手里的片段时会把文件重新建出来，清不干净。</summary>
+    internal bool StatsHeldElsewhere
+    {
+        get
+        {
+            if (_stats != null) return false;
+            try
+            {
+                if (!Mutex.TryOpenExisting(App.InstanceMutexName, out var m)) return false;
+                m.Dispose();
+                return true;
+            }
+            catch (UnauthorizedAccessException) { return true; } // 以管理员身份跑着的那一份建的锁，打不开但确实在
+            catch (Exception ex) { Log.Error("single-instance", ex); return false; }
+        }
+    }
+
+    /// <summary>--settings 单开时没有记录器，主程序手里正在累计的那段还没落盘，「刷新」算不进来。</summary>
+    internal bool RecordsLive => _stats != null;
+
+    /// <summary>清空全部听歌记录，返回是否删干净了。开着的统计窗口跟着刷新成空状态。</summary>
+    public bool ClearStats()
+    {
+        var ok = _stats?.ClearAll(StatsStore.AllDirs) ?? StatsStore.Clear(StatsStore.AllDirs);
+        // 封面头像是给记录配的图，记录没了它们也该走；收集器的「本次已试过」一并清掉，
+        // 不然接着听同一首歌也不会再存
+        _art?.Reset();
+        ArtCache.Clear();
+        _statsWin?.Refresh();
+        return ok;
+    }
+
+    /// <summary>设置里改了统计页的显示项（配图开关）：开着的统计窗口重画一遍。</summary>
+    public void RefreshStatsWindow() => _statsWin?.Refresh();
+
+    /// <summary>统计窗口里的「开启记录」。统计窗可能是从设置窗里打开的，设置窗上的开关得跟着变。</summary>
+    public void EnableStats()
+    {
+        Cfg.StatsEnabled = true;
+        SaveCfg();
+        _settingsWin?.SyncStatsEnabled(true);
+    }
+
+    /// <summary>打开统计窗口（单例）。平时非模态，开着它照样能用托盘菜单；
+    /// --settings 单开时没有常驻的消息循环，设置窗一关进程就退，只能模态地盖在设置窗上。</summary>
+    public void OpenStats()
+    {
+        if (_statsWin is { IsLoaded: true } open)
+        {
+            // 它比设置窗先开、又是从设置窗里点开的：被设置窗的模态禁用着，拉到前台也点不动，
+            // 只能关掉重开——模态开始之后才建的窗口不在它禁用的名单里
+            var hwnd = new WindowInteropHelper(open).Handle;
+            if (NativeMethods.IsWindowEnabled(hwnd))
+            {
+                if (open.WindowState == WindowState.Minimized) open.WindowState = WindowState.Normal;
+                open.Activate();
+                return;
+            }
+            // 被它自己的「另存为」对话框禁用着：把对话框拉到前台，不能关，关了对话框会跟着没。
+            // 被设置窗模态禁用时本线程的窗口全被禁用，找不到可用的弹窗
+            if (NativeMethods.EnabledPopup(hwnd) is var popup && popup != IntPtr.Zero)
+            {
+                NativeMethods.SetForegroundWindow(popup);
+                return;
+            }
+            open.Close();
+        }
+        var win = new StatsWindow(this);
+        _statsWin = win;
+        win.Closed += (_, _) => { if (ReferenceEquals(_statsWin, win)) _statsWin = null; };
+        if (_overlay == null && _settingsWin != null)
+        {
+            win.Owner = _settingsWin;
+            win.ShowDialog();
+        }
+        else
+        {
+            win.Show();
+        }
+    }
+
     public void ShowContextMenu() => _tray?.ShowMenuAtCursor();
 
     public void Quit()
@@ -732,6 +945,8 @@ public sealed class MainController : IDisposable
         _lyricsTimer?.Stop();
         _dockTimer?.Stop();
         TaskbarFreeSpace.Stop(); // 只置标志不 join：不能卡在一次可能挂住的 UIA 调用上
+        _stats?.Close(); // 正在累计的那段落盘；轮询线程之后再送来的状态一律忽略
+        _art?.Dispose();
         _tray?.Dispose();
         _cts.Dispose();
     }

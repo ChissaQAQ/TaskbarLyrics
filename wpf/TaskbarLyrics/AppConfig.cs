@@ -43,6 +43,8 @@ public sealed class AppConfig
     [JsonPropertyName("offset_ms")] public int OffsetMs { get; set; } = 0;             // 歌词时间偏移（正为提前：posMs 加得多，查到更靠后的行）
     // 行为
     [JsonPropertyName("hide_on_fullscreen")] public bool HideOnFullscreen { get; set; } = true;
+    [JsonPropertyName("stats_enabled")] public bool StatsEnabled { get; set; } = true;  // 记录听歌统计（只存本机）
+    [JsonPropertyName("stats_images")] public bool StatsImages { get; set; } = true;    // 统计页配封面和头像（播放时顺带下载，存本机）
     // 更新
     [JsonPropertyName("update_check")] public bool UpdateCheck { get; set; } = true;   // 启动时自动检查新版本
     // 上次成功检查更新的 unix 秒。只用于给启动检查节流：GitHub 匿名接口每小时 60 次
@@ -51,6 +53,9 @@ public sealed class AppConfig
     // 播放源
     [JsonPropertyName("player_source")] public string PlayerSource { get; set; } = "auto"; // auto | netease | others
     [JsonPropertyName("player_blocklist")] public List<string> PlayerBlocklist { get; set; } = new() { "chrome", "msedge", "firefox" };
+    // 新手引导：首次运行（还没有配置文件）时由 Load 置上，放出第一首歌或用过一次右键菜单后清掉。
+    // 默认 false：老用户的配置里没有这个键，升级后不该再看一遍引导
+    [JsonPropertyName("show_guide")] public bool ShowGuide { get; set; }
 
     // 保留 Python 版里未知的扩展键，存盘时不丢
     [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; set; }
@@ -60,10 +65,10 @@ public sealed class AppConfig
     public static string ConfigPath { get; private set; } = PrimaryPath;
 
     /// <summary>首选位置：exe 同目录。</summary>
-    private static string PrimaryPath => Path.Combine(AppContext.BaseDirectory, "config.json");
+    internal static string PrimaryPath => Path.Combine(AppContext.BaseDirectory, "config.json");
 
     /// <summary>exe 同目录只读时（装在 Program Files、或从只读介质运行）的退路。</summary>
-    private static string FallbackPath => Path.Combine(
+    internal static string FallbackPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "TaskbarLyrics", "config.json");
 
@@ -84,9 +89,9 @@ public sealed class AppConfig
         // 首选那份坏了（已被隔离成 .bad），另一处哪怕旧一点也比全默认值强
         if (TryLoadFrom(second, out cfg)) { ConfigPath = second; return cfg; }
         // 两处都没有（首次运行）或都坏了：用默认值，并按便携优先写回 exe 同目录，
-        // 那里写不进去时 Save 会自己切到退路
+        // 那里写不进去时 Save 会自己切到退路。设置全是默认值，也就当新用户带一遍引导
         ConfigPath = PrimaryPath;
-        return new AppConfig();
+        return new AppConfig { ShowGuide = true };
     }
 
     /// <summary>决定这次从哪读。

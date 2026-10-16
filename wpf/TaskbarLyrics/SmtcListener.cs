@@ -10,6 +10,8 @@ using Windows.Media.Control;
 using Windows.Storage.Streams;
 // 类型名太长，且要在元组签名里出现
 using MediaProps = Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties;
+using PlaybackKind = Windows.Media.MediaPlaybackType;
+using RepeatKind = Windows.Media.MediaPlaybackAutoRepeatMode;
 
 namespace TaskbarLyrics;
 
@@ -86,6 +88,14 @@ public sealed class PlaybackState
     public double BaseTime;
     // SMTC 上报的原始进度（网易云恒为 0，用于判断是否有真实进度更新）
     public double RawPositionS;
+    // 以下只给听歌统计记录用，播放器不报时为空。专辑不进 Key：它常比歌名晚到，进了 Key 会被当成切歌
+    public string Album = "";
+    public string AlbumArtist = "";
+    public int TrackNumber;
+    public string[] Genres = [];
+    public string PlaybackType = "";    // music | video | image
+    public bool? Shuffle;
+    public string Repeat = "";          // none | track | list
 
     public string Key => $"{Title}｜{Artist}";
 
@@ -208,8 +218,44 @@ public static class SmtcListener
             BaseTime = Clock.Now,
             RawPositionS = positionS,
         };
+        // 附加信息逐项各自兜底：外层一抛整个状态就成了 null，歌词会消失、统计片段被切断，
+        // 不能为了一个可有可无的字段赔上这些
+        state.Album = Safe(() => props.AlbumTitle?.Trim() ?? "", "");
+        state.AlbumArtist = Safe(() => props.AlbumArtist?.Trim() ?? "", "");
+        state.TrackNumber = Safe(() => Math.Max(0, props.TrackNumber), 0);
+        state.Genres = Safe(() => (props.Genres ?? (IReadOnlyList<string>)[])
+            .Select(g => g?.Trim() ?? "")
+            .Where(g => g.Length > 0 && g.Length <= 40)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(5)
+            .ToArray(), []);
+        state.PlaybackType = Safe(() => TypeName(info.PlaybackType ?? props.PlaybackType), "");
+        state.Shuffle = Safe(() => info.IsShuffleActive, null);
+        state.Repeat = Safe(() => RepeatName(info.AutoRepeatMode), "");
         return (state, props);
     }
+
+    private static T Safe<T>(Func<T> get, T fallback)
+    {
+        try { return get(); }
+        catch { return fallback; }
+    }
+
+    internal static string TypeName(PlaybackKind? t) => t switch
+    {
+        PlaybackKind.Music => "music",
+        PlaybackKind.Video => "video",
+        PlaybackKind.Image => "image",
+        _ => "",
+    };
+
+    internal static string RepeatName(RepeatKind? r) => r switch
+    {
+        RepeatKind.None => "none",
+        RepeatKind.Track => "track",
+        RepeatKind.List => "list",
+        _ => "",
+    };
 
     private static async Task<byte[]?> ReadThumbnailAsync(MediaProps props)
     {

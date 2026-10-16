@@ -1,6 +1,6 @@
 // 系统托盘图标 + 共享右键菜单（WPF ContextMenu，自动套用 Fluent/Win11 主题）。
 // 托盘菜单与歌词窗口右键菜单用同一份定义：任务栏/浮动（check）、锁定（check）、
-// 打开设置…、退出。NotifyIcon 在 UI 线程创建，事件直接在 UI 线程触发，无需跨线程投递。
+// 听歌统计…、打开设置…、退出。NotifyIcon 在 UI 线程创建，事件直接在 UI 线程触发，无需跨线程投递。
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Forms;
@@ -74,14 +74,29 @@ public sealed class TrayIcon : IDisposable
         menu.Items.Add(new Separator());
         // 歌词偏移放进菜单：对不上的时候要能一边听一边点着调，
         // 走设置页得「打开→改数字→应用→关掉」，试一次的成本太高。
-        // 用子菜单收起来，主菜单不至于被三行占掉
+        // 用子菜单收起来，主菜单不至于被三行占掉。
+        // 分两组：「仅这首歌」应付个别歌词源时间轴不准，切歌自动回正；「所有歌曲」是存盘的全局偏移。
+        // 临时那组放上面——单首对不上远比整体都对不上常见
         var offset = new MenuItem { Header = $"歌词偏移（{_app.OffsetLabel()}）" };
+        MenuItem Caption(string text) => new() { Header = text, IsEnabled = false }; // 置灰当小标题
+        MenuItem SongItem(string header, Action onClick)
+        {
+            var mi = Item(header, false, onClick);
+            mi.IsEnabled = _app.HasSong; // 没在放歌时「这首」无从说起
+            return mi;
+        }
+        offset.Items.Add(Caption("仅这首歌（切歌后自动回正）"));
+        offset.Items.Add(SongItem("提前 0.5 秒", () => _app.NudgeSongOffset(500)));
+        offset.Items.Add(SongItem("延后 0.5 秒", () => _app.NudgeSongOffset(-500)));
+        offset.Items.Add(SongItem("回正", _app.ResetSongOffset));
+        offset.Items.Add(new Separator());
+        offset.Items.Add(Caption("所有歌曲"));
         offset.Items.Add(Item("提前 0.5 秒（歌词比人声慢时选）", false, () => _app.NudgeOffset(500)));
         offset.Items.Add(Item("延后 0.5 秒（歌词比人声快时选）", false, () => _app.NudgeOffset(-500)));
-        offset.Items.Add(new Separator());
         offset.Items.Add(Item("归零", false, () => _app.SetOffset(0)));
         menu.Items.Add(offset);
         menu.Items.Add(new Separator());
+        menu.Items.Add(Item("听歌统计…", false, _app.OpenStats));
         menu.Items.Add(Item("打开设置…", false, _app.OpenSettings));
         menu.Items.Add(new Separator());
         menu.Items.Add(Item("退出", false, _app.Quit));
@@ -99,7 +114,7 @@ public sealed class TrayIcon : IDisposable
     }
 
     /// <summary>下载那几秒里用户可能已经点了退出，图标没了就别再弹。</summary>
-    private void ShowTip(string text, ToolTipIcon icon)
+    public void ShowTip(string text, ToolTipIcon icon = ToolTipIcon.Info)
     {
         if (_disposed) return;
         _icon.ShowBalloonTip(5000, "任务栏歌词", text, icon);
@@ -141,6 +156,9 @@ public sealed class TrayIcon : IDisposable
         menu.Closed += (_, _) =>
         {
             owner.Close();
+            // 用户自己摸到了菜单，新手引导就不必再挂在任务栏上了。放在菜单关掉时而不是打开时：
+            // 打开时就撤，右键的那块占位会在菜单底下当场消失，像是点坏了
+            _app.EndGuide();
             if (prevFg == IntPtr.Zero) return;
             // 把焦点还给打开菜单前的窗口；若焦点在我们自己的窗口上
             // （如刚从菜单打开的设置对话框）就不抢

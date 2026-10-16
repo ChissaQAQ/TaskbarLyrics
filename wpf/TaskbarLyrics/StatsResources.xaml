@@ -1,0 +1,240 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- 听歌统计窗口与年度报告窗口共用的样式、模板。
+         配色规则同设置窗：只用 Fluent 主题的自适应画刷，绝不用 SystemColors（理由见 SettingsWindow.xaml）。
+         模板绑的是 StatsWindow.xaml.cs 里的 BarView / RankView / HeatView -->
+
+    <!-- 以下五个与 SettingsWindow.xaml 同名样式保持一致：
+         只有设置窗和这里两处用，抽成全局资源反而要牵动设置窗 -->
+    <Style x:Key="Card" TargetType="Border">
+        <Setter Property="CornerRadius" Value="8"/>
+        <Setter Property="Padding" Value="16,4"/>
+        <Setter Property="Margin" Value="0,0,0,14"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource ControlStrokeColorDefaultBrush}"/>
+        <Setter Property="Background" Value="{DynamicResource CardBackgroundFillColorDefaultBrush}"/>
+    </Style>
+    <Style x:Key="RowTitle" TargetType="TextBlock">
+        <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}"/>
+        <Setter Property="FontSize" Value="13"/>
+    </Style>
+    <Style x:Key="RowDesc" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="12"/>
+        <Setter Property="TextWrapping" Value="Wrap"/>
+        <Setter Property="Margin" Value="0,3,0,0"/>
+        <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}"/>
+    </Style>
+    <Style x:Key="CardHeader" TargetType="TextBlock">
+        <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}"/>
+        <Setter Property="FontSize" Value="13"/>
+        <Setter Property="FontWeight" Value="SemiBold"/>
+        <Setter Property="Margin" Value="4,0,0,6"/>
+    </Style>
+    <Style x:Key="PageHeader" TargetType="TextBlock">
+        <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}"/>
+        <Setter Property="FontSize" Value="24"/>
+        <Setter Property="FontWeight" Value="SemiBold"/>
+        <Setter Property="Margin" Value="0,2,0,16"/>
+    </Style>
+
+    <!-- 放图表、榜单的卡片：比设置行的卡片多留些上下内边距 -->
+    <Style x:Key="Panel" TargetType="Border" BasedOn="{StaticResource Card}">
+        <Setter Property="Padding" Value="18,14"/>
+    </Style>
+    <Style x:Key="PanelTitle" TargetType="TextBlock">
+        <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}"/>
+        <Setter Property="FontSize" Value="14"/>
+        <Setter Property="FontWeight" Value="SemiBold"/>
+        <Setter Property="VerticalAlignment" Value="Center"/>
+    </Style>
+    <!-- 榜单底下的说明（没有专辑信息、没有新歌之类），内容为空时收起 -->
+    <Style x:Key="PanelNote" TargetType="TextBlock" BasedOn="{StaticResource RowDesc}">
+        <Setter Property="Margin" Value="0,6,0,0"/>
+        <Style.Triggers>
+            <Trigger Property="Text" Value="">
+                <Setter Property="Visibility" Value="Collapsed"/>
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+
+    <!-- 工具栏按钮里的图标。按钮本身不套样式：显式样式会顶掉 Fluent 主题给按钮的隐式样式 -->
+    <Style x:Key="ToolIcon" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="Segoe MDL2 Assets"/>
+        <Setter Property="FontSize" Value="12"/>
+        <Setter Property="VerticalAlignment" Value="Center"/>
+        <Setter Property="Margin" Value="0,0,8,0"/>
+    </Style>
+
+    <!-- 分段切换（按日/周/月、时间范围、排序）：RadioButton 套药丸外观，选中的那段填强调色 -->
+    <Style x:Key="Seg" TargetType="RadioButton">
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="FontSize" Value="12"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="RadioButton">
+                    <Border x:Name="Bg" CornerRadius="4" Padding="12,4" Margin="3,0,0,0" BorderThickness="1"
+                            Background="{DynamicResource ControlFillColorDefaultBrush}"
+                            BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}">
+                        <ContentPresenter x:Name="Text" HorizontalAlignment="Center"
+                                          TextElement.Foreground="{DynamicResource TextFillColorPrimaryBrush}"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Bg" Property="Background" Value="{DynamicResource SubtleFillColorTertiaryBrush}"/>
+                        </Trigger>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="Bg" Property="Background" Value="{DynamicResource AccentFillColorDefaultBrush}"/>
+                            <Setter TargetName="Bg" Property="BorderBrush" Value="{DynamicResource AccentFillColorDefaultBrush}"/>
+                            <Setter TargetName="Text" Property="TextElement.Foreground"
+                                    Value="{DynamicResource TextOnAccentFillColorPrimaryBrush}"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- 小卡片：概览五格、趣味发现、年报亮点共用 -->
+    <DataTemplate x:Key="FactTemplate">
+        <Border CornerRadius="8" Padding="14,12" Margin="5" BorderThickness="1"
+                BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}"
+                Background="{DynamicResource CardBackgroundFillColorDefaultBrush}">
+            <StackPanel>
+                <TextBlock Text="{Binding Title}" FontSize="12" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                <!-- 窗口窄时概览五格挤在一行，「12 小时 34 分」放不下：整体缩小，不截成省略号 -->
+                <Viewbox StretchDirection="DownOnly" HorizontalAlignment="Left" Margin="0,4,0,2">
+                    <TextBlock Text="{Binding Value}" FontSize="20" FontWeight="SemiBold"
+                               Foreground="{DynamicResource TextFillColorPrimaryBrush}"/>
+                </Viewbox>
+                <TextBlock Text="{Binding Detail}" FontSize="12" TextWrapping="Wrap"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+            </StackPanel>
+        </Border>
+    </DataTemplate>
+
+    <ItemsPanelTemplate x:Key="BarPanel">
+        <UniformGrid Rows="1"/>
+    </ItemsPanelTemplate>
+
+    <!-- 一根柱子。悬停提示挂在整列的透明格子上，细柱子也好指；
+         柱区高度 120 与 StatsWindow.xaml.cs 的 ChartHeight 一致。
+         日期标签左右给负边距：30 根柱子时一列只有二十几像素，「10/15」放不下会被裁掉 -->
+    <DataTemplate x:Key="BarTemplate">
+        <Grid x:Name="Cell" Background="Transparent" ToolTip="{Binding Tip}"
+              ToolTipService.InitialShowDelay="80" ToolTipService.BetweenShowDelay="0">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="120"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Border Height="1" VerticalAlignment="Bottom" Background="{DynamicResource DividerStrokeColorDefaultBrush}"/>
+            <Border x:Name="Bar" Height="{Binding Height}" MaxWidth="28" Margin="2,0"
+                    VerticalAlignment="Bottom" CornerRadius="3,3,0,0" Opacity="{Binding Opacity}"
+                    Background="{DynamicResource AccentFillColorDefaultBrush}"/>
+            <TextBlock Grid.Row="1" Text="{Binding Label}" FontSize="11" Margin="-24,6,-24,0"
+                       TextAlignment="Center" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+        </Grid>
+        <DataTemplate.Triggers>
+            <Trigger SourceName="Cell" Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bar" Property="Opacity" Value="1"/>
+            </Trigger>
+        </DataTemplate.Triggers>
+    </DataTemplate>
+
+    <!-- 热力图一格：底下一层浅灰，上面一层强调色按听的多少调透明度；没听过的格子只剩浅灰 -->
+    <DataTemplate x:Key="HeatTemplate">
+        <Grid x:Name="Cell" Height="18" Margin="1.5" Background="Transparent" ToolTip="{Binding Tip}"
+              ToolTipService.InitialShowDelay="80" ToolTipService.BetweenShowDelay="0">
+            <Border CornerRadius="3" Background="{DynamicResource ControlAltFillColorSecondaryBrush}"/>
+            <Border CornerRadius="3" Opacity="{Binding Opacity}" Background="{DynamicResource AccentFillColorDefaultBrush}"/>
+            <Border x:Name="Ring" CornerRadius="3" BorderThickness="1" BorderBrush="Transparent"/>
+        </Grid>
+        <DataTemplate.Triggers>
+            <Trigger SourceName="Cell" Property="IsMouseOver" Value="True">
+                <Setter TargetName="Ring" Property="BorderBrush" Value="{DynamicResource TextFillColorPrimaryBrush}"/>
+            </Trigger>
+        </DataTemplate.Triggers>
+    </DataTemplate>
+
+    <!-- 热力图左边的星期标签，和格子的行一一对齐（格子高 18、上下各留 1.5） -->
+    <Style x:Key="HeatLabel" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="11"/>
+        <Setter Property="VerticalAlignment" Value="Center"/>
+        <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}"/>
+    </Style>
+
+    <!-- 排行榜一行：名次 / 配图 / 歌名+歌手+占比条 / 次数与时长 -->
+    <DataTemplate x:Key="RankTemplate">
+        <Grid Margin="0,6">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="28"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <TextBlock x:Name="RankText" Text="{Binding Rank}" FontSize="13" FontWeight="SemiBold" Margin="0,1,0,0"
+                       Foreground="{DynamicResource TextFillColorTertiaryBrush}"/>
+            <!-- 配图：歌曲、专辑是圆角方块，歌手是圆。没图时露出底下的占位（音符、唱片、歌手名的头一个字）。
+                 不做淡入：存分享图时会截到半透明的那一帧 -->
+            <Grid x:Name="ArtBox" Grid.Column="1" Grid.RowSpan="2" Width="32" Height="32" Margin="0,0,10,0"
+                  VerticalAlignment="Top">
+                <Border x:Name="ArtHolder" CornerRadius="4" BorderThickness="1"
+                        Background="{DynamicResource ControlAltFillColorSecondaryBrush}"
+                        BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}">
+                    <Grid>
+                        <TextBlock Text="{Binding Glyph}" FontFamily="Segoe MDL2 Assets" FontSize="14"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                                   Foreground="{DynamicResource TextFillColorTertiaryBrush}"/>
+                        <TextBlock Text="{Binding Initial}" FontSize="13" FontWeight="SemiBold"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                    </Grid>
+                </Border>
+                <Border x:Name="ArtImage" CornerRadius="4" BorderThickness="1"
+                        BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}">
+                    <Border.Background>
+                        <ImageBrush ImageSource="{Binding Image}" Stretch="UniformToFill"/>
+                    </Border.Background>
+                </Border>
+            </Grid>
+            <StackPanel Grid.Column="2">
+                <TextBlock Text="{Binding Title}" ToolTip="{Binding Title}" FontSize="13" TextTrimming="CharacterEllipsis"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}"/>
+                <TextBlock x:Name="SubText" Text="{Binding Sub}" FontSize="12" TextTrimming="CharacterEllipsis"
+                           Margin="0,2,0,0" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+            </StackPanel>
+            <TextBlock Grid.Column="3" Text="{Binding Right}" FontSize="12" Margin="14,1,0,0"
+                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+            <!-- 占比条横跨到右侧文字下方：各行右侧文字长短不一，只占中间列的话每行的条长度不同，没法比 -->
+            <Grid Grid.Row="1" Grid.Column="2" Grid.ColumnSpan="2" Height="4" Margin="0,6,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="{Binding Fill}"/>
+                    <ColumnDefinition Width="{Binding Rest}"/>
+                </Grid.ColumnDefinitions>
+                <Border Grid.ColumnSpan="2" CornerRadius="2" Background="{DynamicResource ControlAltFillColorSecondaryBrush}"/>
+                <Border CornerRadius="2" Background="{DynamicResource AccentFillColorDefaultBrush}"/>
+            </Grid>
+        </Grid>
+        <DataTemplate.Triggers>
+            <DataTrigger Binding="{Binding Top}" Value="True">
+                <Setter TargetName="RankText" Property="Foreground" Value="{DynamicResource AccentTextFillColorPrimaryBrush}"/>
+            </DataTrigger>
+            <DataTrigger Binding="{Binding Sub}" Value="">
+                <Setter TargetName="SubText" Property="Visibility" Value="Collapsed"/>
+            </DataTrigger>
+            <DataTrigger Binding="{Binding Kind}" Value="None">
+                <Setter TargetName="ArtBox" Property="Visibility" Value="Collapsed"/>
+            </DataTrigger>
+            <DataTrigger Binding="{Binding Kind}" Value="Artist">
+                <Setter TargetName="ArtHolder" Property="CornerRadius" Value="16"/>
+                <Setter TargetName="ArtImage" Property="CornerRadius" Value="16"/>
+            </DataTrigger>
+            <DataTrigger Binding="{Binding Image}" Value="{x:Null}">
+                <Setter TargetName="ArtImage" Property="Visibility" Value="Collapsed"/>
+            </DataTrigger>
+        </DataTemplate.Triggers>
+    </DataTemplate>
+</ResourceDictionary>

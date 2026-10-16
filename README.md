@@ -42,9 +42,16 @@
 - 自动检查更新，一键更新
 - 歌词缓存到本地（30 天，最多 400 首），听过的歌断网也有词
 - 锁定位置后鼠标穿透
+- 听歌统计：累计听了多久、每天 / 周 / 月的时长、最常听的歌 / 歌手 / 专辑（按次数或时长排）、新发现的歌、一天里和一周里什么时候听，还有几张趣味小卡片；可以只看某个播放器
+- 年度听歌报告，统计页和年报都能存成图片或复制去分享（图里没有文件路径）
+- 统计页和年报的榜单配专辑封面、歌手头像
 - 托盘图标
 
 设置保存在 exe 旁边的 `config.json`，删掉就恢复默认。如果那个目录不能写（比如放在 Program Files 里），会改存到 `%AppData%\TaskbarLyrics\`。
+
+听歌统计记在 `config.json` 旁边的 `stats` 文件夹里，一个月一个文件，只存在本机，不上传。设置里可以关掉记录，也可以一键清空。每段记录有：开始时间和时区、听了多久、歌名、歌手、播放器，以及播放器报了的专辑、专辑歌手、曲目号、流派、随机 / 循环模式、歌曲时长和播放进度、这段为什么结束（暂停、切歌之类），还有歌词库里匹配到的歌曲 id 和专辑。
+
+统计页的封面和头像是播放时顺带存的：一首歌听满 8 秒后，封面优先用播放器给的那张，没有再从歌词的同一来源（网易云 / QQ 音乐）下载，歌手头像也从那里来。图存在 `config.json` 旁边的 `art-cache` 文件夹，打开统计页不联网，以前听的歌不会补图。设置里可以关掉，清空听歌记录时一起清掉。
 
 ## 原理
 
@@ -73,6 +80,10 @@ wpf/publish/TaskbarLyrics.exe --lyrics-test "歌名" "歌手" [translation|romaj
 
 # 测试检查更新
 wpf/publish/TaskbarLyrics.exe --update-test
+
+# 听歌统计自测：不带参数跑断言；report 对本机真实记录出文字报告；
+# shot 把统计窗口、分享图、年度报告渲染成 PNG，浅色深色各一套（默认合成数据，加 real 用真实记录）
+wpf/publish/TaskbarLyrics.exe --stats-test [report | shot <目录> [real]]
 ```
 
 代码在 `wpf/TaskbarLyrics/`：
@@ -88,6 +99,11 @@ wpf/publish/TaskbarLyrics.exe --update-test
 | `TaskbarFreeSpace.cs` | 计算任务栏上的空位 |
 | `SettingsWindow.xaml(.cs)` / `TrayIcon.cs` / `AppConfig.cs` | 设置、托盘、配置 |
 | `Updater.cs` | 检查和安装更新 |
+| `ListenStats.cs` | 记录听歌片段、读写统计文件 |
+| `StatsReport.cs` / `StatsWindow.xaml(.cs)` | 汇总统计、统计窗口 |
+| `ArtCollector.cs` / `ArtCache.cs` | 播放时收集封面和头像、本地图片缓存 |
+| `YearReportWindow.xaml(.cs)` / `ShareImage.cs` | 年度报告、把界面存成分享图 |
+| `StatsSelfTest.cs` | 听歌统计的控制台自测 |
 
 不少看着多余的写法是为了绕开 Windows 的坑，注释里有写原因，改之前可以先看看。
 
@@ -99,4 +115,4 @@ wpf/publish/TaskbarLyrics.exe --update-test
 
 代码使用 [MIT](LICENSE) 许可。
 
-歌词来自网易云音乐、QQ 音乐、LRCLIB 和酷狗的公开接口，版权归原权利方。本地缓存只是为了少发请求，30 天后过期。仅供个人使用。
+歌词、专辑封面和歌手头像来自网易云音乐、QQ 音乐、LRCLIB 和酷狗的公开接口，版权归原权利方。本地缓存只是为了少发请求：歌词 30 天后过期，图片超过 1500 张时先删最久没看的。仅供个人使用。

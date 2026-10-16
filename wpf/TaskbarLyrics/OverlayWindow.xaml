@@ -48,40 +48,43 @@
              底色由 ApplyThemeChrome 按任务栏明暗设置（浅色任务栏上要换成淡黑） -->
         <Border x:Name="HoverMask" CornerRadius="6"
                 Margin="2,4" Opacity="0" IsHitTestVisible="False"
-                HorizontalAlignment="Left"/>
+                HorizontalAlignment="Left">
+            <Border.RenderTransform><TranslateTransform/></Border.RenderTransform>
+        </Border>
         <!-- 封面区：占位底（无封面时显示音符占位）+ 封面图（有封面时盖住占位） -->
         <Grid x:Name="CoverZone" HorizontalAlignment="Left" VerticalAlignment="Center"
               Margin="6,0,0,0" Visibility="Collapsed">
+            <Grid.RenderTransform><TranslateTransform/></Grid.RenderTransform>
             <Rectangle x:Name="PlaceholderBg" RadiusX="4" RadiusY="4"/>
             <TextBlock x:Name="PlaceholderIcon" Text="&#xE189;" FontFamily="Segoe MDL2 Assets" FontSize="13"
                        HorizontalAlignment="Center" VerticalAlignment="Center"/>
             <Rectangle x:Name="CoverRect" RadiusX="4" RadiusY="4"/>
         </Grid>
-        <!-- 主体区：按钮列（宿主宽度可动画，悬停时 0→96 展开，内容随之平滑右移）+ 内容列 -->
-        <Grid x:Name="BodyGrid">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
-            <Border x:Name="ButtonsHost" Grid.Column="0" Width="0"
-                    ClipToBounds="True" VerticalAlignment="Stretch">
-                <StackPanel x:Name="ButtonsPanel" Orientation="Horizontal" Width="96"
-                            VerticalAlignment="Stretch" Opacity="0" IsHitTestVisible="False">
-                    <Button x:Name="BtnPrev" Style="{StaticResource CtrlButton}" Content="&#xE892;" Click="BtnPrev_Click"/>
-                    <Button x:Name="BtnPlayPause" Style="{StaticResource CtrlButton}" Content="&#xE768;" Click="BtnPlayPause_Click"/>
-                    <Button x:Name="BtnNext" Style="{StaticResource CtrlButton}" Content="&#xE893;" Click="BtnNext_Click"/>
-                </StackPanel>
-            </Border>
-            <Grid x:Name="ContentArea" Grid.Column="1" ClipToBounds="True">
-                <!-- 歌词行容器：切行时新旧两行在此叠加做滑动淡入淡出；
-                     ClipToBounds 供超长歌词滚动裁剪 -->
-                <Grid x:Name="LinesHost" VerticalAlignment="Center" ClipToBounds="True"/>
-                <!-- 歌曲信息层：悬停或暂停一段时间后代替歌词显示（上行歌名、下行歌手） -->
-                <StackPanel x:Name="InfoPanel" VerticalAlignment="Center" Opacity="0" IsHitTestVisible="False">
-                    <TextBlock x:Name="TitleText" HorizontalAlignment="Center" TextTrimming="CharacterEllipsis"/>
-                    <TextBlock x:Name="ArtistText" HorizontalAlignment="Center" TextTrimming="CharacterEllipsis"/>
-                </StackPanel>
-            </Grid>
+        <!-- 下面三层各自独立定位（左边距、宽度由 Dock 指定），悬停展开/收起只动平移和透明度，
+             不改任何一层的排版：歌词不会因为腾位置给按钮而重排、滚动跳位（见 UpdateDisplayMode） -->
+        <!-- 歌词行容器：切行时新旧两行在此叠加做滑动淡入淡出；
+             ClipToBounds 供超长歌词滚动裁剪 -->
+        <Grid x:Name="LinesHost" HorizontalAlignment="Left" VerticalAlignment="Center" ClipToBounds="True">
+            <Grid.RenderTransform><TranslateTransform/></Grid.RenderTransform>
         </Grid>
+        <!-- 歌曲信息层：悬停或暂停一段时间后代替歌词显示（上行歌名、下行歌手） -->
+        <StackPanel x:Name="InfoPanel" HorizontalAlignment="Left" VerticalAlignment="Center"
+                    Opacity="0" IsHitTestVisible="False">
+            <StackPanel.RenderTransform><TranslateTransform/></StackPanel.RenderTransform>
+            <TextBlock x:Name="TitleText" HorizontalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+            <TextBlock x:Name="ArtistText" HorizontalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+        </StackPanel>
+        <!-- 播放控制按钮：悬停时在封面右侧露出来，内容层同时右移让出这 96 的位置。
+             裁剪框右缘跟着内容层左缘走（见 UpdateDisplayMode），像抽屉拉开，
+             不会有文字从按钮上面滑过去。放最上层，保证点得到 -->
+        <StackPanel x:Name="ButtonsPanel" Orientation="Horizontal" Width="96"
+                    HorizontalAlignment="Left" VerticalAlignment="Stretch"
+                    Opacity="0" IsHitTestVisible="False">
+            <StackPanel.RenderTransform><TranslateTransform/></StackPanel.RenderTransform>
+            <StackPanel.Clip><RectangleGeometry x:Name="ButtonsClip" Rect="0,0,0,1000"/></StackPanel.Clip>
+            <Button x:Name="BtnPrev" Style="{StaticResource CtrlButton}" Content="&#xE892;" Click="BtnPrev_Click"/>
+            <Button x:Name="BtnPlayPause" Style="{StaticResource CtrlButton}" Content="&#xE768;" Click="BtnPlayPause_Click"/>
+            <Button x:Name="BtnNext" Style="{StaticResource CtrlButton}" Content="&#xE893;" Click="BtnNext_Click"/>
+        </StackPanel>
     </Grid>
 </Window>

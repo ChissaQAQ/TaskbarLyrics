@@ -157,7 +157,7 @@ public static partial class Lyrics
 
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(5) };
 
-    private const string NeteaseUa = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
+    internal const string NeteaseUa = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
 
     private static async Task<string> GetStringAsync(string url, string? referer = null, string? ua = null)
     {
@@ -256,21 +256,113 @@ public static partial class Lyrics
     /// 前者是「首选候选的歌词请求失败、用了次选候选」，后者是「正常应答、确实没有」（此时 Lines 为空）。
     /// 「确实没有」不能再用 null 表达——null 同时还代表限流、错误码，调用方分不清该不该重试。
     /// ArtistMismatch：候选里一个歌手都对不上，是放开歌手闸挑出来的（见 PreferArtistMatched），
-    /// 多半是同名翻唱。它只配当备胎，FetchAsync 会先去别的源找歌手对得上的版本。</summary>
+    /// 多半是同名翻唱。它只配当备胎，FetchAsync 会先去别的源找歌手对得上的版本。
+    /// Id / Album：曲库里匹配到的那首（ne:id、qq:songmid、lrc:id）和它登记的专辑，只给听歌统计记录用。
+    /// Cover / Artists：这首的专辑封面地址和各位歌手的头像线索，只给听歌统计存图用（见 ArtCollector）。</summary>
     private sealed record SourceResult(List<LyricLine> Lines, double DurationS,
-        bool Degraded = false, bool NotFound = false, bool ArtistMismatch = false);
+        bool Degraded = false, bool NotFound = false, bool ArtistMismatch = false,
+        string? Id = null, string? Album = null,
+        string? Cover = null, IReadOnlyList<ArtRef>? Artists = null);
+
+    /// <summary>曲库里登记的一位歌手和他的头像线索：QQ 是头像地址，网易云是 ne:歌手id
+    /// （网易云搜索结果里的头像字段全是占位图，真头像要另查一次，只在真要存图时才查）。</summary>
+    public sealed record ArtRef(string Name, string Ref);
+
+    // 网易云 picId 换图片地址的密钥：地址里那段是 picId 十进制串与它逐字节异或后的 MD5
+    private static readonly byte[] NeteasePicKey = "3go8&$8*3*3h0k(2)2"u8.ToArray();
+
+    // 网易云「没有图」时给的默认图，当成没有：白底占位图（封面、搜索结果里的头像），
+    // 灰底人形剪影（没传头像的歌手，头像接口照样 code=200 给这张）
+    private const long NeteasePlaceholderPic = 5639395138885805;
+    private const long NeteaseNoAvatarPic = 18686200114669622;
+
+    /// <summary>网易云图片地址是不是「没有图」时的默认图。</summary>
+    internal static bool IsNeteaseDefaultPic(string? url)
+        => NeteasePicIdOfUrl(url) is NeteasePlaceholderPic or NeteaseNoAvatarPic;
+
+    /// <summary>网易云专辑封面地址（300px）。搜索接口只给 picId 不给地址，按网易云客户端的规则算出来；
+    /// 自测钉了一组从 song/detail 接口抄来的真值。picId 无效或是默认图时返回 null。</summary>
+    internal static string? NeteaseCoverUrl(long picId)
+    {
+        if (picId <= 0 || picId is NeteasePlaceholderPic or NeteaseNoAvatarPic) return null;
+        var id = picId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var bytes = Encoding.ASCII.GetBytes(id);
+        for (var i = 0; i < bytes.Length; i++) bytes[i] ^= NeteasePicKey[i % NeteasePicKey.Length];
+        var enc = Convert.ToBase64String(System.Security.Cryptography.MD5.HashData(bytes))
+            .Replace('/', '_').Replace('+', '-');
+        return $"https://p1.music.126.net/{enc}/{id}.jpg?param=300y300";
+    }
+
+    /// <summary>网易云图片地址里的 picId（文件名部分），认不出返回 0。专辑详情给的是现成地址，
+    /// 拿 picId 重新算一遍：统一尺寸参数，也顺带认出默认图。</summary>
+    private static long NeteasePicIdOfUrl(string? url)
+    {
+        if (string.IsNullOrEmpty(url)) return 0;
+        var path = url.Split('?')[0];
+        var name = path[(path.LastIndexOf('/') + 1)..];
+        var dot = name.IndexOf('.');
+        return long.TryParse(dot > 0 ? name[..dot] : name, out var v) ? v : 0;
+    }
+
+    /// <summary>网易云条目的字段，两套名字都认：search/get/web 的歌曲是 artists / album / duration / alias，
+    /// cloudsearch/pc 的歌曲和专辑详情的曲目是 ar / al / dt / alia。前一个名字没有就找后一个。</summary>
+    private static bool NeteaseProp(JsonElement song, string name, string alt, out JsonElement value)
+        => song.TryGetProperty(name, out value) || song.TryGetProperty(alt, out value);
+
+    /// <summary>网易云条目里的歌手（name + id）。</summary>
+    private static List<ArtRef> NeteaseArtists(JsonElement song)
+    {
+        var list = new List<ArtRef>();
+        if (!NeteaseProp(song, "artists", "ar", out var arr) || arr.ValueKind != JsonValueKind.Array) return list;
+        foreach (var a in arr.EnumerateArray())
+        {
+            var name = a.TryGetProperty("name", out var nv) && nv.ValueKind == JsonValueKind.String
+                ? (nv.GetString() ?? "").Trim() : "";
+            if (name.Length > 0 && a.TryGetProperty("id", out var iv) && iv.ValueKind == JsonValueKind.Number
+                && iv.TryGetInt64(out var aid) && aid > 0)
+                list.Add(new ArtRef(name, $"ne:{aid}"));
+        }
+        return list;
+    }
+
+    /// <summary>网易云候选：歌词接口要的 id、挑候选用的时长和歌名分数，以及给听歌统计带出去的专辑和图片线索。</summary>
+    private sealed record NeteaseCand(long Id, double Dur, int Ts, string Album, string? Cover, List<ArtRef> Artists);
 
     // ---- 网易云 ----
+
+    /// <summary>网易云搜索（type 1 歌曲、10 专辑）。search/get/web 会按 IP 限流：HTTP 200 而 code=405
+    /// 「操作频繁，请稍候再试」，一限就是好几分钟，期间每首新歌都只能退到没有译文的 QQ——
+    /// 主人反馈的「正在运行的版本突然不显示翻译了」就是它。实测同一时刻 cloudsearch/pc 照常应答，
+    /// 就换它再搜一次。它的字段名不同（见 NeteaseProp），结果顺序也不同，但候选都要按歌名、歌手、
+    /// 时长重排，顺序不要紧。两个都不正常时返回后一个的应答，由调用方看 code。
+    /// web 那个不行之后的 5 分钟里直接搜 cloudsearch：限流期间每首歌都先白打一次，还可能把限流一直续上</summary>
+    private static async Task<JsonDocument> NeteaseSearchAsync(string keyword, string type, string limit, string referer)
+    {
+        var q = Q(new() { ["s"] = keyword, ["type"] = type, ["limit"] = limit });
+        if (Environment.TickCount64 >= Volatile.Read(ref _webSearchBlockedUntil))
+        {
+            try
+            {
+                var doc = await GetJsonAsync("https://music.163.com/api/search/get/web?" + q, referer);
+                if (NeteaseOk(doc.RootElement)) return doc;
+                doc.Dispose();
+            }
+            catch (Exception ex) when (ex is HttpRequestException or JsonException)
+            {
+                // HTTP 状态码不正常、应答不是 JSON（风控页）：同样换另一个接口。超时不换，另一个多半也连不上
+            }
+            Volatile.Write(ref _webSearchBlockedUntil, Environment.TickCount64 + 5 * 60_000);
+        }
+        return await GetJsonAsync("https://music.163.com/api/cloudsearch/pc?" + q, referer);
+    }
+
+    private static long _webSearchBlockedUntil; // 开机以来的毫秒数，改系统时间不影响
 
     private static async Task<SourceResult?> FetchNeteaseAsync(
         string title, string artist, double durationS, string secondLine)
     {
         const string referer = "https://music.163.com";
-        using var search = await GetJsonAsync(
-            "https://music.163.com/api/search/get/web?" + Q(new()
-            {
-                ["s"] = $"{title} {artist}", ["type"] = "1", ["limit"] = "30",
-            }), referer);
+        using var search = await NeteaseSearchAsync($"{title} {artist}", "1", "30", referer);
         // 限流 / 风控时网易云照样回 HTTP 200，只是 JSON 的 code 变成 -460 / -462 / 405 / 406 之类，
         // 也不带 result。原先这和「确实搜不到」一起走 return null，调用方就分不清是该等它恢复
         // 还是该死心——所以非正常应答直接抛出，按请求失败处理（FetchAsync 会换下一个源）
@@ -285,21 +377,36 @@ public static partial class Lyrics
         // 严格相等会漏歌（「Lyricify 能显示而我们不能」的主因之一）。比较规则见 ArtistMatches
         static bool ArtistMatch(JsonElement song, string artist)
         {
-            if (!song.TryGetProperty("artists", out var artists)
+            if (!NeteaseProp(song, "artists", "ar", out var artists)
                 || artists.ValueKind != JsonValueKind.Array) return false;
             return ArtistMatches(artists.EnumerateArray()
                 .Select(a => a.TryGetProperty("name", out var nv) ? nv.GetString() ?? "" : ""), artist);
         }
         // 别名只给版本标签判断用：有的 Live / 伴奏条目歌名是干净的，标签在 alias 里
         static string? AliasOf(JsonElement song) =>
-            song.TryGetProperty("alias", out var al) && al.ValueKind == JsonValueKind.Array
+            NeteaseProp(song, "alias", "alia", out var al) && al.ValueKind == JsonValueKind.Array
                 ? string.Join(" ", al.EnumerateArray()
                     .Select(x => x.ValueKind == JsonValueKind.String ? x.GetString() ?? "" : ""))
                 : null;
         var all = songs.EnumerateArray().ToList();
         // 曲库登记的时长（毫秒 → 秒），既用于挑候选也要带回给调用方补 SMTC 的空缺
         static double DurOf(JsonElement song) =>
-            song.TryGetProperty("duration", out var dv) ? dv.GetDouble() / 1000 : 0.0;
+            NeteaseProp(song, "duration", "dt", out var dv) ? dv.GetDouble() / 1000 : 0.0;
+        static string AlbumOf(JsonElement song) =>
+            NeteaseProp(song, "album", "al", out var al) && al.ValueKind == JsonValueKind.Object
+            && al.TryGetProperty("name", out var nv) && nv.ValueKind == JsonValueKind.String
+                ? (nv.GetString() ?? "").Trim() : "";
+        // 封面：搜索结果的专辑里只有 picId（cloudsearch/pc 叫 pic）。大 id 超出 double 精度，按 Int64 读原文；
+        // 有的应答另带字符串版的 picId_str（pic_str），那份最可靠
+        static string? CoverOf(JsonElement song)
+        {
+            if (!NeteaseProp(song, "album", "al", out var al) || al.ValueKind != JsonValueKind.Object) return null;
+            if (NeteaseProp(al, "picId_str", "pic_str", out var ps) && ps.ValueKind == JsonValueKind.String
+                && long.TryParse(ps.GetString(), out var p1))
+                return NeteaseCoverUrl(p1);
+            return NeteaseProp(al, "picId", "pic", out var pv) && pv.ValueKind == JsonValueKind.Number
+                && pv.TryGetInt64(out var p2) ? NeteaseCoverUrl(p2) : null;
+        }
         // 歌名必须匹配（必要条件），歌手匹配与时长接近只是排序权重——
         // 只按歌手+时长挑会把同歌手、时长接近的别的歌抓来（主人反馈偶尔匹配错歌）
         var scored = all
@@ -307,7 +414,7 @@ public static partial class Lyrics
                           Ts: TitleScore(s.TryGetProperty("name", out var nv) ? nv.GetString() ?? "" : "", title,
                               AliasOf(s)),
                           Artist: ArtistMatch(s, artist),
-                          DurDiff: durationS > 0 && s.TryGetProperty("duration", out _)
+                          DurDiff: durationS > 0 && NeteaseProp(s, "duration", "dt", out _)
                               ? Math.Abs(DurOf(s) - durationS) : 0.0))
             .Where(x => x.Ts > 0)
             // 时长差太多基本是另一版本/另一首歌（现场版、remix 宁缺毋滥）
@@ -322,11 +429,13 @@ public static partial class Lyrics
         // 这首明明有整份中文译文。专辑搜索倒能找到那张专辑，专辑详情里也列着这首歌。
         // 所以只在搜不到「歌名满分且歌手对得上」的候选时，再按专辑找一遍：平时不多花请求
         var extra = scored.Any(x => x.Ts >= TitleScoreMax && x.Artist)
-            ? new List<(long Id, double Dur, int Ts)>()
+            ? new List<NeteaseCand>()
             : await NeteaseAlbumTracksAsync(title, artist, durationS, referer);
-        var ordered = (extra ?? new List<(long Id, double Dur, int Ts)>())
+        var ordered = (extra ?? new List<NeteaseCand>())
             .Concat(PreferArtistMatched(scored, x => x.Artist)
-                .Select(x => (Id: x.Song.GetProperty("id").GetInt64(), Dur: DurOf(x.Song), x.Ts)))
+                // 歌手对不上的（翻唱）不带封面：播放器没报专辑时，那张翻唱专辑的封面会被存成原唱的
+                .Select(x => new NeteaseCand(x.Song.GetProperty("id").GetInt64(), DurOf(x.Song), x.Ts,
+                              AlbumOf(x.Song), x.Artist ? CoverOf(x.Song) : null, NeteaseArtists(x.Song))))
             .ToList();
         // 实测「告白氣球 / 周杰倫」：网易云没有周杰伦的版本，搜出来全是翻唱、伴奏和 beat。
         // 带时长的播放器（QQ 音乐、Spotify）一过时长闸，剩下的歌手全对不上，放开后挑中的是
@@ -348,7 +457,7 @@ public static partial class Lyrics
         // 落到了次选），结果要标成降级、不进缓存，否则一次抖动会把次优版本冻结 30 天。
         // 按专辑找那一步失败同理：漏掉的可能正是本该挑的那首
         var anyFailed = extra == null;
-        foreach (var (id, dur, ts) in ordered.Take(3))
+        foreach (var (id, dur, ts, album, cover, artists) in ordered.Take(3))
         {
             JsonDocument lyric;
             try
@@ -396,7 +505,8 @@ public static partial class Lyrics
                 var merged = MergeTranslation(lines, trans, title, artist);
                 // 提前返回时后面的候选还没打，失败只可能出在前面，此刻的 anyFailed 就是全部
                 var picked = new SourceResult(merged, dur, Degraded: anyFailed,
-                    ArtistMismatch: artistMismatch);
+                    ArtistMismatch: artistMismatch, Id: $"ne:{id}", Album: album.Length > 0 ? album : null,
+                    Cover: cover, Artists: artists);
                 firstResult ??= picked;
                 if (secondLine == "off") return picked;
                 // 比较各候选的译文覆盖情况，取最好的那个——不能「见到任意一行译文就走」。
@@ -444,7 +554,7 @@ public static partial class Lyrics
     /// 专辑名与歌名对得上、专辑歌手也对得上的专辑最多看两张，取其中歌名满分、时长不离谱的曲目。
     /// 只认专辑名对得上的：歌手名下的专辑可能有几十张，挨个翻请求太多，而漏搜的
     /// 实测是同名专辑的主打曲。请求失败返回 null（与「确实没找到」的空列表区分开）。</summary>
-    private static async Task<List<(long Id, double Dur, int Ts)>?> NeteaseAlbumTracksAsync(
+    private static async Task<List<NeteaseCand>?> NeteaseAlbumTracksAsync(
         string title, string artist, double durationS, string referer)
     {
         static string NameOf(JsonElement e) =>
@@ -452,14 +562,10 @@ public static partial class Lyrics
         static IEnumerable<string> NamesOf(JsonElement e, string key) =>
             e.TryGetProperty(key, out var arr) && arr.ValueKind == JsonValueKind.Array
                 ? arr.EnumerateArray().Select(NameOf) : Enumerable.Empty<string>();
-        var found = new List<(long Id, double Dur, int Ts)>();
+        var found = new List<NeteaseCand>();
         try
         {
-            using var search = await GetJsonAsync(
-                "https://music.163.com/api/search/get/web?" + Q(new()
-                {
-                    ["s"] = $"{title} {artist}", ["type"] = "10", ["limit"] = "10",
-                }), referer);
+            using var search = await NeteaseSearchAsync($"{title} {artist}", "10", "10", referer);
             if (!NeteaseOk(search.RootElement)) return null;
             if (!search.RootElement.TryGetProperty("result", out var result)
                 || !result.TryGetProperty("albums", out var albums)
@@ -467,10 +573,10 @@ public static partial class Lyrics
                 return found;
             var albumIds = albums.EnumerateArray()
                 .Where(a => TitleScore(NameOf(a), title) > 0 && ArtistMatches(NamesOf(a, "artists"), artist))
-                .Select(a => a.GetProperty("id").GetInt64())
+                .Select(a => (Id: a.GetProperty("id").GetInt64(), Name: NameOf(a).Trim()))
                 .Take(2)
                 .ToList();
-            foreach (var albumId in albumIds)
+            foreach (var (albumId, albumName) in albumIds)
             {
                 using var album = await GetJsonAsync($"https://music.163.com/api/v1/album/{albumId}", referer);
                 if (!NeteaseOk(album.RootElement)) return null;
@@ -484,7 +590,13 @@ public static partial class Lyrics
                     var dur = s.TryGetProperty("dt", out var dt) && dt.ValueKind == JsonValueKind.Number
                         ? dt.GetDouble() / 1000 : 0.0;
                     if (durationS > 0 && dur > 0 && Math.Abs(dur - durationS) > 20) continue;
-                    found.Add((s.GetProperty("id").GetInt64(), dur, ts));
+                    // 曲目自己带的专辑名（al.name）优先，没有就用这张专辑的名字
+                    var al = s.TryGetProperty("al", out var alv) && alv.ValueKind == JsonValueKind.Object
+                        ? NameOf(alv).Trim() : "";
+                    var pic = alv.ValueKind == JsonValueKind.Object && alv.TryGetProperty("picUrl", out var pu)
+                        && pu.ValueKind == JsonValueKind.String ? NeteasePicIdOfUrl(pu.GetString()) : 0;
+                    found.Add(new NeteaseCand(s.GetProperty("id").GetInt64(), dur, ts, al.Length > 0 ? al : albumName,
+                        NeteaseCoverUrl(pic), NeteaseArtists(s)));
                 }
             }
         }
@@ -560,11 +672,30 @@ public static partial class Lyrics
             .ToList();
         if (ordered.Count == 0) return null;
         var chosen = PreferArtistMatched(ordered, x => x.Artist)[0].Song;
+        var mid = chosen.GetProperty("songmid").GetString() ?? "";
+        var albumName = chosen.TryGetProperty("albumname", out var an) && an.ValueKind == JsonValueKind.String
+            ? (an.GetString() ?? "").Trim() : "";
+        // 图片线索：专辑 mid 和歌手 mid 直接拼成 QQ 的图片地址（没有图时那个地址回 404）
+        var albumMid = chosen.TryGetProperty("albummid", out var am) && am.ValueKind == JsonValueKind.String
+            ? (am.GetString() ?? "").Trim() : "";
+        var qqArtists = new List<ArtRef>();
+        if (chosen.TryGetProperty("singer", out var sg) && sg.ValueKind == JsonValueKind.Array)
+            foreach (var x in sg.EnumerateArray())
+            {
+                var n = x.TryGetProperty("name", out var nv2) && nv2.ValueKind == JsonValueKind.String
+                    ? (nv2.GetString() ?? "").Trim() : "";
+                var smid = x.TryGetProperty("mid", out var mv) && mv.ValueKind == JsonValueKind.String
+                    ? (mv.GetString() ?? "").Trim() : "";
+                if (n.Length > 0 && QqMidRegex().IsMatch(smid))
+                    qqArtists.Add(new ArtRef(n, $"https://y.gtimg.cn/music/photo_new/T001R300x300M000{smid}.jpg"));
+            }
+        var qqCover = QqMidRegex().IsMatch(albumMid)
+            ? $"https://y.gtimg.cn/music/photo_new/T002R300x300M000{albumMid}.jpg" : null;
 
         var text = await GetStringAsync(
             "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?" + Q(new()
             {
-                ["songmid"] = chosen.GetProperty("songmid").GetString() ?? "",
+                ["songmid"] = mid,
                 ["format"] = "json", ["nobase64"] = "1", ["g_tk"] = "5381",
             }), referer);
         text = text.Trim();
@@ -577,8 +708,14 @@ public static partial class Lyrics
         if (durationS > 0 && lines[^1].Ms / 1000.0 > durationS + 30) return null;
         var trans = ParseLrc(lyric.RootElement.TryGetProperty("trans", out var t) ? t.GetString() ?? "" : "");
         return new SourceResult(MergeTranslation(lines, trans, title, artist), IntervalOf(chosen),
-            ArtistMismatch: !ordered.Any(x => x.Artist));
+            ArtistMismatch: !ordered.Any(x => x.Artist),
+            Id: mid.Length > 0 ? $"qq:{mid}" : null, Album: albumName.Length > 0 ? albumName : null,
+            Cover: qqCover, Artists: qqArtists);
     }
+
+    // QQ 的 mid 是十几位字母数字；拼进地址前先核一遍，防应答里混进别的字符
+    [GeneratedRegex("^[0-9A-Za-z]{6,32}$")]
+    private static partial Regex QqMidRegex();
 
     // ---- LRCLIB ----
 
@@ -604,8 +741,13 @@ public static partial class Lyrics
         var mismatch = doc.RootElement.TryGetProperty("artistName", out var an)
             && an.ValueKind == JsonValueKind.String
             && !ArtistMatches(new[] { an.GetString() ?? "" }, artist);
+        var root = doc.RootElement;
+        var lid = root.TryGetProperty("id", out var iv) && iv.ValueKind == JsonValueKind.Number
+                  && iv.TryGetInt64(out var idv) ? $"lrc:{idv}" : null;
+        var album = root.TryGetProperty("albumName", out var alv) && alv.ValueKind == JsonValueKind.String
+            ? (alv.GetString() ?? "").Trim() : "";
         return new SourceResult(MergeTranslation(lines, new List<(int, string)>(), title, artist), dur,
-            ArtistMismatch: mismatch);
+            ArtistMismatch: mismatch, Id: lid, Album: album.Length > 0 ? album : null);
     }
 
     // ---- 逐字：酷狗 KRC ----
@@ -780,7 +922,7 @@ public static partial class Lyrics
     // feat/ft 要求前有词边界、后跟空白，免得切到 "Daft"、"Swift" 这种词中间
     [GeneratedRegex(@"[/／、,，;；|｜]|\b(?:feat|ft)\.?\s+|\bfeaturing\s+",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-    private static partial Regex ArtistSeparatorRegex();
+    internal static partial Regex ArtistSeparatorRegex(); // 听歌统计按单个歌手汇总时也用它拆
 
     /// <summary>把歌手串拆成单个歌手，并逐个做匹配用归一化（繁简、全角、大小写、去标点）。</summary>
     private static List<string> SplitArtists(string s)
@@ -852,7 +994,7 @@ public static partial class Lyrics
     /// 一路退到没有译文的 lrclib 兜底源；行文本对不上则整首歌的逐字全丢。
     /// 两侧同时归一化只会把本来不同的字合并，不会把本来相同的拆开，方向上是安全的；
     /// 代价是「干/幹/乾」这类多对一映射会略微放宽匹配，由歌手与时长那两道闸兜着。</summary>
-    private static string NormalizeForMatch(string s)
+    internal static string NormalizeForMatch(string s)
     {
         var sb = new StringBuilder(s.Length);
         foreach (var c in s)
@@ -1884,6 +2026,9 @@ public static partial class Lyrics
     /// 不再为「等网易云恢复」而重试——即使备选源给了歌词，这个标志也照样带着。
     /// ArtistMismatch：各源都没有歌手对得上的版本，这是放开歌手闸退回来的备胎（可能是翻唱），
     /// 调用方给它排最低一档，重试拿到歌手对得上的任何结果都该顶掉它。
+    /// MatchId / MatchAlbum：匹配到的曲库条目（ne:id、qq:songmid、lrc:id）和它登记的专辑，听歌统计记录用。
+    /// ArtistMismatch 时两者都是 null（翻唱的 id 记了也是错的），所以缓存不必另存这个标志。
+    /// MatchCover / MatchArtists：同一条目的专辑封面地址和歌手头像线索，规则同上（备胎时为 null）。
     /// 这几个字段只能追加在末尾且带默认值：缓存读取和调用方都还在用前四个参数的构造。</summary>
     public readonly record struct FetchResult(
         List<LyricLine>? Lines,
@@ -1892,7 +2037,11 @@ public static partial class Lyrics
         double SongDurationS,
         bool Degraded = false,
         bool PrimaryNotFound = false,
-        bool ArtistMismatch = false);
+        bool ArtistMismatch = false,
+        string? MatchId = null,
+        string? MatchAlbum = null,
+        string? MatchCover = null,
+        IReadOnlyList<ArtRef>? MatchArtists = null);
 
     /// <summary>依次尝试各歌词源。
     /// 逐字表：{主行时间ms: 逐字}，取不到或匹配不上时为空 dict（退化为逐行显示）。
@@ -2024,7 +2173,8 @@ public static partial class Lyrics
             }
         }
         var result = new FetchResult(lines, karaoke, sourceName, found.DurationS, degraded, primaryNotFound,
-            usedFallback);
+            usedFallback, MatchId: usedFallback ? null : found.Id, MatchAlbum: usedFallback ? null : found.Album,
+            MatchCover: usedFallback ? null : found.Cover, MatchArtists: usedFallback ? null : found.Artists);
         // 只缓存首选源的完整结果：落到备选源说明首选源当时抓失败了（多半是网络抖动），
         // 那是调用方 5s 后要重试自愈的情况，写进缓存等于把「没有译文的次优结果」
         // 永久冻结，重试也只会一遍遍读到同一份坏缓存。
@@ -2064,7 +2214,8 @@ public static partial class Lyrics
         string secondLine = "translation", double durationS = 0)
     {
         // 诊断入口一律绕过缓存：否则改完匹配算法再来验证，读到的还是上次的结果
-        var (found, karaoke, source, songDur, degraded, primaryNotFound, artistMismatch) =
+        var (found, karaoke, source, songDur, degraded, primaryNotFound, artistMismatch, matchId, matchAlbum,
+                matchCover, matchArtists) =
             await FetchAsync(title, artist, durationS, secondLine: secondLine, useCache: false);
         if (found == null)
         {
@@ -2085,11 +2236,16 @@ public static partial class Lyrics
         if (degraded) Console.WriteLine("  [降级] 有一步请求失败，这份结果不会写缓存");
         if (primaryNotFound) Console.WriteLine("  [网易云确实没有这首歌，或只有歌手对不上的版本] 调用方不再为它重试");
         if (artistMismatch) Console.WriteLine("  [歌手对不上] 各源都没有这位歌手的版本，退回了同名的备胎（可能是翻唱）");
+        if (matchId != null)
+            Console.WriteLine($"  匹配到 {matchId}{(matchAlbum != null ? $"（专辑《{matchAlbum}》）" : "")}，听歌统计会记下它");
+        if (matchCover != null) Console.WriteLine($"  封面 {matchCover}");
+        foreach (var a in matchArtists ?? [])
+            Console.WriteLine($"  歌手 {a.Name} → {a.Ref}");
 
         // 主歌词侧对照（不抓逐字，拿到的就是网易云原样的行集）：反转成以 KRC 为文本主体后
         // 译文是靠跨源配对挂回来的，某行缺译文有两种完全不同的成因——网易云自己的译文轨
         // 就没对上这行（MergeTranslation 的时间容差），或者跨源配对没把它挂上。两侧一比即分晓
-        var (raw, _, _, _, _, _, _) = await FetchAsync(title, artist, durationS, withKaraoke: false,
+        var (raw, _, _, _, _, _, _, _, _, _, _) = await FetchAsync(title, artist, durationS, withKaraoke: false,
             secondLine: secondLine, useCache: false);
         if (raw != null)
         {

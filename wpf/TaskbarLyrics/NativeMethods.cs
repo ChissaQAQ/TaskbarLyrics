@@ -34,6 +34,11 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool IsWindow(IntPtr hWnd);
 
+    /// <summary>窗口是否可交互：别的模态对话框开着时，它打开前已存在的窗口都被禁用。</summary>
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool IsWindowEnabled(IntPtr hWnd);
+
     public const uint MONITOR_DEFAULTTONEAREST = 2;
 
     [StructLayout(LayoutKind.Sequential)]
@@ -192,6 +197,15 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+
+    private const uint GW_ENABLEDPOPUP = 6;
+
+    /// <summary>窗口自己名下开着的、可用的弹窗（比如它的「另存为」对话框），没有返回 Zero。</summary>
+    public static IntPtr EnabledPopup(IntPtr hwnd)
+    {
+        var popup = GetWindow(hwnd, GW_ENABLEDPOPUP);
+        return popup == hwnd ? IntPtr.Zero : popup;
+    }
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
